@@ -101,7 +101,7 @@ func (c *Connect) UnpackFlags(b byte) {
 }
 
 // Unpack is the implementation of the interface required function for a packet
-func (c *Connect) Unpack(r *bytes.Buffer) error {
+func (c *Connect) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 	var err error
 
 	if c.ProtocolName, err = readString(r); err != nil {
@@ -122,10 +122,14 @@ func (c *Connect) Unpack(r *bytes.Buffer) error {
 		return err
 	}
 
-	err = c.Properties.Unpack(r, CONNECT)
-	if err != nil {
-		return err
+	if c.ProtocolVersion == 5 {
+		err = c.Properties.Unpack(r, CONNECT)
+		if err != nil {
+			return err
+		}
 	}
+
+	c.ProtocolVersion = 5
 
 	c.ClientID, err = readString(r)
 	if err != nil {

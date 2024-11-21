@@ -50,7 +50,7 @@ func (a *Auth) String() string {
 }
 
 // Unpack is the implementation of the interface required function for a packet
-func (a *Auth) Unpack(r *bytes.Buffer) error {
+func (a *Auth) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 	var err error
 
 	success := r.Len() == 0

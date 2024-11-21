@@ -489,7 +489,7 @@ func (c *Client) incoming(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			recv, err := packets.ReadPacket(c.config.Conn)
+			recv, err := packets.ReadPacket(c.config.Conn, 5)
 			if err != nil {
 				go c.error(err)
 				return
@@ -944,7 +944,7 @@ func (c *Client) publishQoS12(ctx context.Context, pb *packets.Publish, o Publis
 }
 
 func (c *Client) expectConnack(packet chan<- *packets.Connack, errs chan<- error) {
-	recv, err := packets.ReadPacket(c.config.Conn)
+	recv, err := packets.ReadPacket(c.config.Conn, 5)
 	if err != nil {
 		errs <- err
 		return

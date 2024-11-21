@@ -143,7 +143,7 @@ func TestNewControlPacketConnect(t *testing.T) {
 func TestReadPacketConnect(t *testing.T) {
 	p := []byte{16, 38, 0, 4, 77, 81, 84, 84, 5, 128, 0, 30, 5, 17, 0, 0, 0, 30, 0, 10, 116, 101, 115, 116, 67, 108, 105, 101, 110, 116, 0, 8, 116, 101, 115, 116, 85, 115, 101, 114}
 
-	c, err := ReadPacket(bufio.NewReader(bytes.NewReader(p)))
+	c, err := ReadPacket(bufio.NewReader(bytes.NewReader(p)), 5)
 
 	require.Nil(t, err)
 	assert.Equal(t, uint16(30), c.Content.(*Connect).KeepAlive)
@@ -444,7 +444,7 @@ func BenchmarkWriteTo(b *testing.B) {
 
 	go func(r io.Reader, done chan int) {
 		for {
-			_, err := ReadPacket(r)
+			_, err := ReadPacket(r, 5)
 			if err != nil {
 				b.Error(err)
 			}

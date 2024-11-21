@@ -212,7 +212,7 @@ func (i *Instance) Connect(ctx context.Context) (net.Conn, chan struct{}, error)
 // handleIncoming runs as a goroutine processing inbound data received on net.Conn until an error occurs (i.e. Conn Closed)
 func (i *Instance) handleIncoming(conn io.Reader, out chan<- *packets.ControlPacket) error {
 	for {
-		p, err := packets.ReadPacket(conn)
+		p, err := packets.ReadPacket(conn, 5)
 		if err != nil {
 			r := bufio.NewReader(conn)
 			time.Sleep(time.Millisecond) // Wait a millisecond for other data to come in (helps with debugging)

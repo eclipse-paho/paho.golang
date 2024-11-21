@@ -222,7 +222,7 @@ func (s *State) ConAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 
 		// DUP needs to be set when resending PUBLISH
 		// Read/parse the full packet, so we can detect corruption (e.g. 0 byte file)
-		p, err := packets.ReadPacket(r)
+		p, err := packets.ReadPacket(r, 5)
 		if cErr := r.Close(); cErr != nil {
 			s.errors.Printf("failed to close stored client packet %d: %s", id, cErr)
 		}

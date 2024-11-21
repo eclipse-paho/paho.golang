@@ -78,7 +78,7 @@ func TestDefaultPingerSuccess(t *testing.T) {
 	go func() {
 		// keep reading from fakeServerConn and call PingResp() when a PINGREQ is received
 		for {
-			recv, err := packets.ReadPacket(fakeServerConn)
+			recv, err := packets.ReadPacket(fakeServerConn, 5)
 			if err != nil {
 				return
 			}
@@ -131,7 +131,7 @@ func TestDefaultPingerPacketSent(t *testing.T) {
 	tooManyPingreqs := make(chan struct{})
 	go func() {
 		for {
-			recv, err := packets.ReadPacket(fakeServerConn)
+			recv, err := packets.ReadPacket(fakeServerConn, 5)
 			if err != nil {
 				return
 			}

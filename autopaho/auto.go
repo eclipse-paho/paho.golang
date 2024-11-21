@@ -584,7 +584,7 @@ connectionLoop:
 					continue
 				}
 
-				p, err := packets.ReadPacket(r)
+				p, err := packets.ReadPacket(r, 5)
 				if err != nil {
 					c.errors.Printf("error retrieving packet from queue: %s", err)
 					// If the packet cannot be processed, then we need to remove it from the queue

@@ -59,7 +59,7 @@ func (c *Connack) String() string {
 }
 
 // Unpack is the implementation of the interface required function for a packet
-func (c *Connack) Unpack(r *bytes.Buffer) error {
+func (c *Connack) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 	connackFlags, err := r.ReadByte()
 	if err != nil {
 		return err
@@ -71,10 +71,13 @@ func (c *Connack) Unpack(r *bytes.Buffer) error {
 		return err
 	}
 
-	err = c.Properties.Unpack(r, CONNACK)
-	if err != nil {
-		return err
+	if protocolVersion == 5 {
+		err = c.Properties.Unpack(r, CONNACK)
+		if err != nil {
+			return err
+		}
 	}
+
 
 	return nil
 }

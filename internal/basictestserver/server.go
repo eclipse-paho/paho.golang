@@ -85,7 +85,7 @@ func (t *TestServer) Run() {
 	// read incoming packets in a separate goroutine to avoid deadlocks due to unbuffered t.conn
 	go func() {
 		for {
-			recv, err := packets.ReadPacket(t.conn)
+			recv, err := packets.ReadPacket(t.conn, 5)
 			if err != nil {
 				t.logger.Println("error in test server reading packet", err)
 				close(incoming)

@@ -60,7 +60,7 @@ func TestFileStore(t *testing.T) {
 	if rp, err := s.Get(32300); err != nil {
 		t.Fatalf("failed to get: %s", err)
 	} else {
-		p, err := packets.ReadPacket(rp)
+		p, err := packets.ReadPacket(rp, 5)
 		if err != nil {
 			t.Fatalf("error decoding packet: %s", err)
 		}

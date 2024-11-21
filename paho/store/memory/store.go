@@ -135,7 +135,7 @@ func (m *Store) Reset() error {
 func (m *Store) String() string {
 	var b bytes.Buffer
 	for i, c := range m.data {
-		p, err := packets.ReadPacket(bytes.NewReader(c.p))
+		p, err := packets.ReadPacket(bytes.NewReader(c.p), 5)
 		if err != nil {
 			b.WriteString(fmt.Sprintf("packet %d could not be read: %s\n", i, err))
 			continue

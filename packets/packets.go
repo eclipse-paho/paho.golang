@@ -51,7 +51,7 @@ const (
 type (
 	// Packet is the interface defining the unique parts of a controlpacket
 	Packet interface {
-		Unpack(*bytes.Buffer) error
+		Unpack(*bytes.Buffer, byte) error
 		Buffers() net.Buffers
 		WriteTo(io.Writer) (int64, error)
 	}
@@ -236,7 +236,7 @@ func NewControlPacket(t byte) *ControlPacket {
 
 // ReadPacket reads a control packet from a io.Reader and returns a completed
 // struct with the appropriate data
-func ReadPacket(r io.Reader) (*ControlPacket, error) {
+func ReadPacket(r io.Reader, protocolVersion byte) (*ControlPacket, error) {
 	t := [1]byte{}
 	_, err := io.ReadFull(r, t[:])
 	if err != nil {
@@ -249,6 +249,11 @@ func ReadPacket(r io.Reader) (*ControlPacket, error) {
 
 	pt := t[0] >> 4
 	cp := &ControlPacket{FixedHeader: FixedHeader{Type: pt}}
+
+	if protocolVersion == 0 && pt != CONNECT {
+		return nil, fmt.Errorf("protocol version unknown")
+	}
+
 	switch pt {
 	case CONNECT:
 		cp.Content = &Connect{
@@ -318,7 +323,7 @@ func ReadPacket(r io.Reader) (*ControlPacket, error) {
 	if n != int64(cp.remainingLength) {
 		return nil, fmt.Errorf("failed to read packet, expected %d bytes, read %d", cp.remainingLength, n)
 	}
-	err = cp.Content.Unpack(&content)
+	err = cp.Content.Unpack(&content, protocolVersion)
 	if err != nil {
 		return nil, err
 	}

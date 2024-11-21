@@ -57,7 +57,7 @@ func (p *Pubrec) String() string {
 }
 
 // Unpack is the implementation of the interface required function for a packet
-func (p *Pubrec) Unpack(r *bytes.Buffer) error {
+func (p *Pubrec) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 	var err error
 	success := r.Len() == 2
 	noProps := r.Len() == 3

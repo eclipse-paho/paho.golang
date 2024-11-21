@@ -44,16 +44,18 @@ func (s *Unsubscribe) Type() byte {
 }
 
 // Unpack is the implementation of the interface required function for a packet
-func (u *Unsubscribe) Unpack(r *bytes.Buffer) error {
+func (u *Unsubscribe) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 	var err error
 	u.PacketID, err = readUint16(r)
 	if err != nil {
 		return err
 	}
 
-	err = u.Properties.Unpack(r, UNSUBSCRIBE)
-	if err != nil {
-		return err
+	if protocolVersion == 5 {
+		err = u.Properties.Unpack(r, UNSUBSCRIBE)
+		if err != nil {
+			return err
+		}
 	}
 
 	for {

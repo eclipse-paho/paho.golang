@@ -55,7 +55,7 @@ func TestMemoryStore(t *testing.T) {
 	if rp, err := s.Get(32300); err != nil {
 		t.Fatalf("failed to get: %s", err)
 	} else {
-		p, err := packets.ReadPacket(rp)
+		p, err := packets.ReadPacket(rp, 5)
 		if err != nil {
 			t.Fatalf("error decoding packet: %s", err)
 		}
@@ -113,7 +113,7 @@ func TestMemoryStoreBig(t *testing.T) {
 		if err != nil {
 			t.Fatal("getting missing item should fail")
 		}
-		pcp, err := packets.ReadPacket(rp)
+		pcp, err := packets.ReadPacket(rp, 5)
 		if err != nil {
 			t.Fatalf("error decoding packet: %s", err)
 		}

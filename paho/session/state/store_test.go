@@ -79,7 +79,7 @@ func TestLoadExistingSession(t *testing.T) {
 	if _, err := ccp.WriteTo(c); err != nil {
 		t.Fatalf("failed to send CONNECT packet: %s", err)
 	}
-	cca, err := packets.ReadPacket(c)
+	cca, err := packets.ReadPacket(c, 5)
 	if err != nil {
 		t.Fatalf("failed to receive CONNACK packet: %s", err)
 	}

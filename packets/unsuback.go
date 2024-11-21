@@ -45,16 +45,18 @@ const (
 )
 
 // Unpack is the implementation of the interface required function for a packet
-func (u *Unsuback) Unpack(r *bytes.Buffer) error {
+func (u *Unsuback) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 	var err error
 	u.PacketID, err = readUint16(r)
 	if err != nil {
 		return err
 	}
 
-	err = u.Properties.Unpack(r, UNSUBACK)
-	if err != nil {
-		return err
+	if protocolVersion == 5 {
+		err = u.Properties.Unpack(r, UNSUBACK)
+		if err != nil {
+			return err
+		}
 	}
 
 	u.Reasons = r.Bytes()
