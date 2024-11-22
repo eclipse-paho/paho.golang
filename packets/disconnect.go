@@ -66,14 +66,14 @@ const (
 )
 
 // Unpack is the implementation of the interface required function for a packet
-func (d *Disconnect) Unpack(r *bytes.Buffer, protocolVersion byte) error {
+func (d *Disconnect) Unpack(r *bytes.Buffer, protocolVersion *byte) error {
 	var err error
 	d.ReasonCode, err = r.ReadByte()
 	if err != nil {
 		return err
 	}
 
-	if protocolVersion == MQTT_5 {
+	if *protocolVersion == MQTT_5 {
 		err = d.Properties.Unpack(r, DISCONNECT)
 		if err != nil {
 			return err

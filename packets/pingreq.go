@@ -30,7 +30,7 @@ func (p *Pingreq) String() string {
 }
 
 // Unpack is the implementation of the interface required function for a packet
-func (p *Pingreq) Unpack(r *bytes.Buffer, protocolVersion byte) error {
+func (p *Pingreq) Unpack(r *bytes.Buffer, protocolVersion *byte) error {
 	return nil
 }
 

@@ -101,7 +101,7 @@ func (c *Connect) UnpackFlags(b byte) {
 }
 
 // Unpack is the implementation of the interface required function for a packet
-func (c *Connect) Unpack(r *bytes.Buffer, protocolVersion byte) error {
+func (c *Connect) Unpack(r *bytes.Buffer, protocolVersion *byte) error {
 	var err error
 
 	if c.ProtocolName, err = readString(r); err != nil {
@@ -129,6 +129,7 @@ func (c *Connect) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 		}
 	}
 
+	*protocolVersion = c.ProtocolVersion 
 	c.ProtocolVersion = MQTT_5
 
 	c.ClientID, err = readString(r)

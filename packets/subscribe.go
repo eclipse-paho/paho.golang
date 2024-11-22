@@ -94,14 +94,14 @@ func (s *SubOptions) Unpack(r *bytes.Buffer) error {
 }
 
 // Unpack is the implementation of the interface required function for a packet
-func (s *Subscribe) Unpack(r *bytes.Buffer, protocolVersion byte) error {
+func (s *Subscribe) Unpack(r *bytes.Buffer, protocolVersion *byte) error {
 	var err error
 	s.PacketID, err = readUint16(r)
 	if err != nil {
 		return err
 	}
 
-	if protocolVersion == MQTT_5 {
+	if *protocolVersion == MQTT_5 {
 		err = s.Properties.Unpack(r, SUBSCRIBE)
 		if err != nil {
 			return err

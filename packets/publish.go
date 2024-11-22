@@ -49,7 +49,7 @@ func (s *Publish) Type() byte {
 }
 
 // Unpack is the implementation of the interface required function for a packet
-func (p *Publish) Unpack(r *bytes.Buffer, protocolVersion byte) error {
+func (p *Publish) Unpack(r *bytes.Buffer, protocolVersion *byte) error {
 	var err error
 	p.Topic, err = readString(r)
 	if err != nil {
@@ -62,7 +62,7 @@ func (p *Publish) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 		}
 	}
 
-	if protocolVersion == MQTT_5 {
+	if *protocolVersion == MQTT_5 {
 		err = p.Properties.Unpack(r, PUBLISH)
 		if err != nil {
 			return err

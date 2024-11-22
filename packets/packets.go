@@ -57,7 +57,7 @@ const (
 type (
 	// Packet is the interface defining the unique parts of a controlpacket
 	Packet interface {
-		Unpack(*bytes.Buffer, byte) error
+		Unpack(*bytes.Buffer, *byte) error
 		Buffers() net.Buffers
 		WriteTo(io.Writer) (int64, error)
 	}
@@ -340,7 +340,7 @@ func ReadPacket(r io.Reader, args ...byte) (*ControlPacket, error) {
 	if n != int64(cp.remainingLength) {
 		return nil, fmt.Errorf("failed to read packet, expected %d bytes, read %d", cp.remainingLength, n)
 	}
-	err = cp.Content.Unpack(&content, protocolVersion)
+	err = cp.Content.Unpack(&content, &protocolVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -531,4 +531,58 @@ func readString(b *bytes.Buffer) (string, error) {
 	return string(s), err
 }
 
-func getProtocolVersion()
+func getProtocolVersion(r io.Reader) (byte, error) {
+	
+	
+	t := [1]byte{}
+	_, err := io.ReadFull(r, t[:])
+	if err != nil {
+		return 0, err
+	}
+	
+
+	pt := t[0] >> 4
+	cp := &ControlPacket{FixedHeader: FixedHeader{Type: pt}}
+
+	if pt != CONNECT {
+		return 0, fmt.Errorf("cannote determine protocol version from non CONNECT packet")
+	}
+
+	
+	cp.Content = &Connect{
+		ProtocolName:    "MQTT",
+		ProtocolVersion: 5,
+		Properties:      &Properties{}}
+
+
+	cp.Flags = t[0] & 0xF
+	
+
+	vbi, err := getVBI(r)
+	if err != nil {
+		return 0, err
+	}
+	cp.remainingLength, err = decodeVBI(vbi)
+	if err != nil {
+		return 0, err
+	}
+
+	var content bytes.Buffer
+	content.Grow(cp.remainingLength)
+
+	n, err := io.CopyN(&content, r, int64(cp.remainingLength))
+	if err != nil {
+		return 0, err
+	}
+
+	if n != int64(cp.remainingLength) {
+		return 0, fmt.Errorf("failed to read packet, expected %d bytes, read %d", cp.remainingLength, n)
+	}
+
+	var protocolVersion byte
+	err = cp.Content.Unpack(&content, &protocolVersion)
+	if err != nil {
+		return 0, err
+	}
+	return protocolVersion, nil
+}

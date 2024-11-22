@@ -50,11 +50,11 @@ func (a *Auth) String() string {
 }
 
 // Unpack is the implementation of the interface required function for a packet
-func (a *Auth) Unpack(r *bytes.Buffer, protocolVersion byte) error {
+func (a *Auth) Unpack(r *bytes.Buffer, protocolVersion *byte) error {
 	var err error
 
 	success := r.Len() == 0
-	noProps := r.Len() == 1 || protocolVersion != MQTT_5
+	noProps := r.Len() == 1 || *protocolVersion != MQTT_5
 	if !success {
 		a.ReasonCode, err = r.ReadByte()
 		if err != nil {
