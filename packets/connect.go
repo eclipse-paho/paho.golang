@@ -122,14 +122,14 @@ func (c *Connect) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 		return err
 	}
 
-	if c.ProtocolVersion == 5 {
+	if c.ProtocolVersion == MQTT_5 {
 		err = c.Properties.Unpack(r, CONNECT)
 		if err != nil {
 			return err
 		}
 	}
 
-	c.ProtocolVersion = 5
+	c.ProtocolVersion = MQTT_5
 
 	c.ClientID, err = readString(r)
 	if err != nil {

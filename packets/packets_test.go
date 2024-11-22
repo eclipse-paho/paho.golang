@@ -444,7 +444,7 @@ func BenchmarkWriteTo(b *testing.B) {
 
 	go func(r io.Reader, done chan int) {
 		for {
-			_, err := ReadPacket(r, 5)
+			_, err := ReadPacket(r)
 			if err != nil {
 				b.Error(err)
 			}

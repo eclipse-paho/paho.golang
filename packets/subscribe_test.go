@@ -130,7 +130,7 @@ func TestSubscribePackUnpack(t *testing.T) {
 			require.Equal(t, tt.want, b.Bytes())
 
 			// Decode and compare with original
-			dstCp, err := ReadPacket(bytes.NewReader(b.Bytes()), 5)
+			dstCp, err := ReadPacket(bytes.NewReader(b.Bytes()))
 			require.NoError(t, err)
 
 			dstP, ok := dstCp.Content.(*Subscribe)

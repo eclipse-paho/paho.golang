@@ -51,7 +51,7 @@ func TestPublishPackUnpack(t *testing.T) {
 				t.Errorf("%s failed to Write PUBLISH: %s", wt, err)
 			}
 
-			dstCp, err := ReadPacket(bytes.NewReader(b.Bytes()), 5)
+			dstCp, err := ReadPacket(bytes.NewReader(b.Bytes()))
 			if err != nil {
 				t.Errorf("%s failed to Read PUBLISH: %s", wt, err)
 			}

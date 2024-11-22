@@ -62,7 +62,7 @@ func (p *Publish) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 		}
 	}
 
-	if protocolVersion == 5 {
+	if protocolVersion == MQTT_5 {
 		err = p.Properties.Unpack(r, PUBLISH)
 		if err != nil {
 			return err

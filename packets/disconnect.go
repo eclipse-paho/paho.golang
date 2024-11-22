@@ -73,7 +73,7 @@ func (d *Disconnect) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 		return err
 	}
 
-	if protocolVersion == 5 {
+	if protocolVersion == MQTT_5 {
 		err = d.Properties.Unpack(r, DISCONNECT)
 		if err != nil {
 			return err

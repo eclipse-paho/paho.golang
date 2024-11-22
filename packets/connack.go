@@ -71,7 +71,7 @@ func (c *Connack) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 		return err
 	}
 
-	if protocolVersion == 5 {
+	if protocolVersion == MQTT_5 {
 		err = c.Properties.Unpack(r, CONNACK)
 		if err != nil {
 			return err

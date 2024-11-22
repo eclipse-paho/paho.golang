@@ -54,7 +54,7 @@ func (a *Auth) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 	var err error
 
 	success := r.Len() == 0
-	noProps := r.Len() == 1
+	noProps := r.Len() == 1 || protocolVersion != MQTT_5
 	if !success {
 		a.ReasonCode, err = r.ReadByte()
 		if err != nil {

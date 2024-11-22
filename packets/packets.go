@@ -48,6 +48,12 @@ const (
 	AUTH
 )
 
+const (
+	MQTT_3 = 3
+	MQTT_3_1_1 = 4
+	MQTT_5 = 5
+)
+
 type (
 	// Packet is the interface defining the unique parts of a controlpacket
 	Packet interface {
@@ -193,7 +199,7 @@ func NewControlPacket(t byte) *ControlPacket {
 	case CONNECT:
 		cp.Content = &Connect{
 			ProtocolName:    "MQTT",
-			ProtocolVersion: 5,
+			ProtocolVersion: MQTT_5,
 			Properties:      &Properties{},
 		}
 	case CONNACK:
@@ -236,7 +242,18 @@ func NewControlPacket(t byte) *ControlPacket {
 
 // ReadPacket reads a control packet from a io.Reader and returns a completed
 // struct with the appropriate data
-func ReadPacket(r io.Reader, protocolVersion byte) (*ControlPacket, error) {
+func ReadPacket(r io.Reader, args ...byte) (*ControlPacket, error) {
+	var protocolVersion byte
+
+	switch len(args) {
+	case 0:
+		protocolVersion = MQTT_5
+	case 1:
+		protocolVersion = args[0]
+	default:
+		protocolVersion = MQTT_5
+	}
+	
 	t := [1]byte{}
 	_, err := io.ReadFull(r, t[:])
 	if err != nil {
@@ -514,4 +531,4 @@ func readString(b *bytes.Buffer) (string, error) {
 	return string(s), err
 }
 
-// func getProtocolVersion()
+func getProtocolVersion()

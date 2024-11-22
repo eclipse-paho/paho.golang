@@ -52,7 +52,7 @@ func (u *Unsuback) Unpack(r *bytes.Buffer, protocolVersion byte) error {
 		return err
 	}
 
-	if protocolVersion == 5 {
+	if protocolVersion == MQTT_5 {
 		err = u.Properties.Unpack(r, UNSUBACK)
 		if err != nil {
 			return err
