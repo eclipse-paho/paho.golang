@@ -23,8 +23,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/eclipse/paho.golang/autopaho"
-	"github.com/eclipse/paho.golang/paho"
+	"github.com/canonical/mqtt.golang/autopaho"
+	"github.com/canonical/mqtt.golang/paho"
 )
 
 const clientID = "PahoGoClient" // Change this to something random if using a public test server
@@ -53,7 +53,7 @@ func main() {
 		CleanStartOnInitialConnection: true,
 		SessionExpiryInterval:         0,
 		OnConnectError:                func(err error) { fmt.Printf("error whilst attempting connection: %s\n", err) },
-		// eclipse/paho.golang/paho provides base mqtt functionality, the below config will be passed in for each connection
+		// canonical/mqtt.golang/paho provides base mqtt functionality, the below config will be passed in for each connection
 		ClientConfig: paho.ClientConfig{
 			// If you are using QOS 1/2, then it's important to specify a client id (which must be unique)
 			ClientID: clientID,

@@ -19,7 +19,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/eclipse/paho.golang/packets"
+	"github.com/canonical/mqtt.golang/packets"
 )
 
 func Test_match(t *testing.T) {

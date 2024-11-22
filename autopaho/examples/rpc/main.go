@@ -29,9 +29,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/eclipse/paho.golang/autopaho"
-	"github.com/eclipse/paho.golang/autopaho/extensions/rpc"
-	"github.com/eclipse/paho.golang/paho"
+	"github.com/canonical/mqtt.golang/autopaho"
+	"github.com/canonical/mqtt.golang/autopaho/extensions/rpc"
+	"github.com/canonical/mqtt.golang/paho"
 )
 
 // rpc - demonstrates the use of autopaho/extensions/rpc

@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/eclipse/paho.golang/paho"
+	"github.com/canonical/mqtt.golang/paho"
 )
 
 // handler is a simple struct that provides a function to be called when a message is received. The message is parsed

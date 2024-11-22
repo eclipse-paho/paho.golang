@@ -19,8 +19,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/eclipse/paho.golang/packets"
-	"github.com/eclipse/paho.golang/paho/log"
+	"github.com/canonical/mqtt.golang/packets"
+	"github.com/canonical/mqtt.golang/paho/log"
 )
 
 // MessageHandler is a type for a function that is invoked

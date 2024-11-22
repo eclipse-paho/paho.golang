@@ -15,7 +15,7 @@
 
 package paho
 
-import "github.com/eclipse/paho.golang/packets"
+import "github.com/canonical/mqtt.golang/packets"
 
 type (
 	// Connect is a representation of the MQTT Connect packet

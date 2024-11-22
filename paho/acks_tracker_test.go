@@ -20,7 +20,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/eclipse/paho.golang/packets"
+	"github.com/canonical/mqtt.golang/packets"
 )
 
 func TestAcksTracker(t *testing.T) {

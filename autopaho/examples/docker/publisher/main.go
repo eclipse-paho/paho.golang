@@ -26,11 +26,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/eclipse/paho.golang/autopaho"
-	"github.com/eclipse/paho.golang/paho"
-	"github.com/eclipse/paho.golang/paho/log"
-	"github.com/eclipse/paho.golang/paho/session/state"
-	storefile "github.com/eclipse/paho.golang/paho/store/file"
+	"github.com/canonical/mqtt.golang/autopaho"
+	"github.com/canonical/mqtt.golang/paho"
+	"github.com/canonical/mqtt.golang/paho/log"
+	"github.com/canonical/mqtt.golang/paho/session/state"
+	storefile "github.com/canonical/mqtt.golang/paho/store/file"
 )
 
 // Connect to the server and publish a message periodically

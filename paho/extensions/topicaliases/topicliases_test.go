@@ -18,7 +18,7 @@ package topicaliases
 import (
 	"testing"
 
-	"github.com/eclipse/paho.golang/paho"
+	"github.com/canonical/mqtt.golang/paho"
 	"github.com/stretchr/testify/assert"
 )
 

@@ -23,11 +23,11 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/eclipse/paho.golang/autopaho"
-	"github.com/eclipse/paho.golang/autopaho/queue"
-	"github.com/eclipse/paho.golang/autopaho/queue/file"
-	"github.com/eclipse/paho.golang/autopaho/queue/memory"
-	"github.com/eclipse/paho.golang/paho"
+	"github.com/canonical/mqtt.golang/autopaho"
+	"github.com/canonical/mqtt.golang/autopaho/queue"
+	"github.com/canonical/mqtt.golang/autopaho/queue/file"
+	"github.com/canonical/mqtt.golang/autopaho/queue/memory"
+	"github.com/canonical/mqtt.golang/paho"
 )
 
 // the Queue interface does not include WaitForEmpty because it's not needed in autopaho; however it's
@@ -85,7 +85,7 @@ func publish(ctx context.Context, serverURL *url.URL, msgCount uint64) {
 		// Debug:          logger{prefix: "publish: debug"},
 		PahoErrors: logger{prefix: "publishP"},
 		// PahoDebug:      logger{prefix: "publishP: debug"},
-		// eclipse/paho.golang/paho provides base mqtt functionality, the below config will be passed in for each connection
+		// canonical/mqtt.golang/paho provides base mqtt functionality, the below config will be passed in for each connection
 		ClientConfig: paho.ClientConfig{
 			ClientID:      "TestPub",
 			OnClientError: func(err error) { fmt.Printf("publish: client error: %s\n", err) },

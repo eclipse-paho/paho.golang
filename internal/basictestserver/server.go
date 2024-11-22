@@ -20,7 +20,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/eclipse/paho.golang/packets"
+	"github.com/canonical/mqtt.golang/packets"
 )
 
 // Logger mirrors paho.Logger

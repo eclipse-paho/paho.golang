@@ -23,8 +23,8 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/eclipse/paho.golang/autopaho"
-	"github.com/eclipse/paho.golang/paho"
+	"github.com/canonical/mqtt.golang/autopaho"
+	"github.com/canonical/mqtt.golang/paho"
 )
 
 // subscribe connects to the server and subscribes to the test topic. It then expects to receive
@@ -64,7 +64,7 @@ func subscribe(ctx context.Context, serverURL *url.URL, msgCount uint64, ready c
 		OnConnectError: func(err error) { fmt.Printf("subscribe: error whilst attempting connection: %s\n", err) },
 		Errors:         logger{prefix: "subscribe"},
 
-		// eclipse/paho.golang/paho provides base mqtt functionality, the below config will be passed in for each connection
+		// canonical/mqtt.golang/paho provides base mqtt functionality, the below config will be passed in for each connection
 		ClientConfig: paho.ClientConfig{
 			ClientID: "TestSub",
 			OnPublishReceived: []func(paho.PublishReceived) (bool, error){

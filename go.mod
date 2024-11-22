@@ -1,4 +1,4 @@
-module github.com/eclipse/paho.golang
+module github.com/canonical/mqtt.golang
 
 go 1.21
 

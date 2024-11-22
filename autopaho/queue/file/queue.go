@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/eclipse/paho.golang/autopaho/queue"
+	"github.com/canonical/mqtt.golang/autopaho/queue"
 )
 
 // A queue implementation that stores all data on disk

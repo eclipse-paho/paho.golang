@@ -513,3 +513,5 @@ func readString(b *bytes.Buffer) (string, error) {
 	s, err := readBinary(b)
 	return string(s), err
 }
+
+// func getProtocolVersion()

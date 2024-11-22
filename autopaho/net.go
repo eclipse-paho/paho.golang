@@ -30,8 +30,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/eclipse/paho.golang/packets"
-	"github.com/eclipse/paho.golang/paho"
+	"github.com/canonical/mqtt.golang/packets"
+	"github.com/canonical/mqtt.golang/paho"
 
 	"golang.org/x/net/proxy"
 )
