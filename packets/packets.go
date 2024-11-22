@@ -531,7 +531,7 @@ func readString(b *bytes.Buffer) (string, error) {
 	return string(s), err
 }
 
-func getProtocolVersion(r io.Reader) (byte, error) {
+func GetProtocolVersion(r io.Reader) (byte, error) {
 	
 	
 	t := [1]byte{}
