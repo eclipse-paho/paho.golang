@@ -531,13 +531,13 @@ func readString(b *bytes.Buffer) (string, error) {
 	return string(s), err
 }
 
-func GetProtocolVersion(r io.Reader) (byte, error) {
+func GetProtocolVersion(r io.Reader) (*ControlPacket, byte, error) {
 	
 	
 	t := [1]byte{}
 	_, err := io.ReadFull(r, t[:])
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	
 
@@ -545,7 +545,7 @@ func GetProtocolVersion(r io.Reader) (byte, error) {
 	cp := &ControlPacket{FixedHeader: FixedHeader{Type: pt}}
 
 	if pt != CONNECT {
-		return 0, fmt.Errorf("cannote determine protocol version from non CONNECT packet")
+		return nil, 0, fmt.Errorf("cannote determine protocol version from non CONNECT packet")
 	}
 
 	
@@ -560,11 +560,11 @@ func GetProtocolVersion(r io.Reader) (byte, error) {
 
 	vbi, err := getVBI(r)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	cp.remainingLength, err = decodeVBI(vbi)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 
 	var content bytes.Buffer
@@ -572,17 +572,17 @@ func GetProtocolVersion(r io.Reader) (byte, error) {
 
 	n, err := io.CopyN(&content, r, int64(cp.remainingLength))
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 
 	if n != int64(cp.remainingLength) {
-		return 0, fmt.Errorf("failed to read packet, expected %d bytes, read %d", cp.remainingLength, n)
+		return nil, 0, fmt.Errorf("failed to read packet, expected %d bytes, read %d", cp.remainingLength, n)
 	}
 
 	var protocolVersion byte
 	err = cp.Content.Unpack(&content, &protocolVersion)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
-	return protocolVersion, nil
+	return cp, protocolVersion, nil
 }
