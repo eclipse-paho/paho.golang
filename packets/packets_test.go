@@ -102,18 +102,21 @@ func TestDecodeVBI127(t *testing.T) {
 	require.Nil(t, err)
 	assert.Equal(t, 127, x)
 }
+
 func TestDecodeVBI128(t *testing.T) {
 	x, err := decodeVBI(bytes.NewBuffer([]byte{0x80, 0x01}))
 
 	require.Nil(t, err)
 	assert.Equal(t, 128, x)
 }
+
 func TestDecodeVBI16384(t *testing.T) {
 	x, err := decodeVBI(bytes.NewBuffer([]byte{0x80, 0x80, 0x01}))
 
 	require.Nil(t, err)
 	assert.Equal(t, 16384, x)
 }
+
 func TestDecodeVBIMax(t *testing.T) {
 	x, err := decodeVBI(bytes.NewBuffer([]byte{0xff, 0xff, 0xff, 0x7f}))
 
@@ -143,7 +146,7 @@ func TestNewControlPacketConnect(t *testing.T) {
 func TestReadPacketConnect(t *testing.T) {
 	p := []byte{16, 38, 0, 4, 77, 81, 84, 84, 5, 128, 0, 30, 5, 17, 0, 0, 0, 30, 0, 10, 116, 101, 115, 116, 67, 108, 105, 101, 110, 116, 0, 8, 116, 101, 115, 116, 85, 115, 101, 114}
 
-	c, err := ReadPacket(bufio.NewReader(bytes.NewReader(p)), 5)
+	c, err := ReadPacket(bufio.NewReader(bytes.NewReader(p)))
 
 	require.Nil(t, err)
 	assert.Equal(t, uint16(30), c.Content.(*Connect).KeepAlive)
@@ -388,7 +391,8 @@ func TestControlPacket_PacketID(t *testing.T) {
 				Content:     &Unsuback{PacketID: 123},
 			},
 			want: 123,
-		}, {
+		},
+		{
 			name: "connect",
 			fields: fields{
 				FixedHeader: FixedHeader{Type: CONNECT},

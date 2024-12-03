@@ -78,7 +78,6 @@ func (c *Connack) Unpack(r *bytes.Buffer, protocolVersion *byte) error {
 		}
 	}
 
-
 	return nil
 }
 

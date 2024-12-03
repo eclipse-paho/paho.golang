@@ -974,7 +974,6 @@ func (c *Client) expectConnack(packet chan<- *packets.Connack, errs chan<- error
 	default:
 		errs <- fmt.Errorf("received unexpected packet %v", recv.Type)
 	}
-
 }
 
 // Disconnect is used to send a Disconnect packet to the MQTT server

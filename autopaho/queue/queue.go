@@ -20,9 +20,7 @@ import (
 	"io"
 )
 
-var (
-	ErrEmpty = errors.New("empty queue")
-)
+var ErrEmpty = errors.New("empty queue")
 
 // Entry - permits access to a queue entry
 // Users must call one of Leave, Remove, or Quarantine when done with the entry (and before calling Peek again)

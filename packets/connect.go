@@ -129,7 +129,7 @@ func (c *Connect) Unpack(r *bytes.Buffer, protocolVersion *byte) error {
 		}
 	}
 
-	*protocolVersion = c.ProtocolVersion 
+	*protocolVersion = c.ProtocolVersion
 	c.ProtocolVersion = MQTT_5
 
 	c.ClientID, err = readString(r)

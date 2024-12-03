@@ -69,7 +69,6 @@ func (p *Publish) Unpack(r *bytes.Buffer, protocolVersion *byte) error {
 		}
 	}
 
-
 	p.Payload, err = ioutil.ReadAll(r)
 	if err != nil {
 		return err
@@ -88,7 +87,6 @@ func (p *Publish) Buffers() net.Buffers {
 	idvp := p.Properties.Pack(PUBLISH)
 	encodeVBIdirect(len(idvp), &b)
 	return net.Buffers{b.Bytes(), idvp, p.Payload}
-
 }
 
 // WriteTo is the implementation of the interface required function for a packet

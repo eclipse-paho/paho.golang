@@ -113,7 +113,8 @@ func publish(ctx context.Context, serverURL *url.URL, msgCount uint64) {
 				QoS:     QOS,
 				Topic:   testTopic,
 				Payload: binary.AppendUvarint([]byte{}, i),
-			}}); err != nil {
+			},
+		}); err != nil {
 			panic(err)
 		}
 

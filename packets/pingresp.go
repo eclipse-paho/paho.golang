@@ -22,8 +22,7 @@ import (
 )
 
 // Pingresp is the Variable Header definition for a Pingresp control packet
-type Pingresp struct {
-}
+type Pingresp struct{}
 
 func (p *Pingresp) String() string {
 	return "PINGRESP"

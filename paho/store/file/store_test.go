@@ -145,7 +145,6 @@ func TestFileStoreNaming(t *testing.T) {
 	if !strings.HasSuffix(fn, corruptExtension) {
 		t.Fatalf("quarantine filename suffix not as expected; got %s", entries[0].Name())
 	}
-
 }
 
 // TestFileStoreBig creates a fully populated Store and checks things work

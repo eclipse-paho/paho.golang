@@ -25,9 +25,7 @@ import (
 	"github.com/canonical/mqtt.golang/packets"
 )
 
-var (
-	ErrNotInStore = errors.New("the requested ID was not found in the store") // Returned when requested ID not found
-)
+var ErrNotInStore = errors.New("the requested ID was not found in the store") // Returned when requested ID not found
 
 // memoryPacket is an element in the memory store
 type memoryPacket struct {
@@ -40,7 +38,6 @@ func New() *Store {
 	return &Store{
 		data: make(map[uint16]memoryPacket),
 	}
-
 }
 
 // Store is an implementation of a Store that stores the data in memory

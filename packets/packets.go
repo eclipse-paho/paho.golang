@@ -49,9 +49,9 @@ const (
 )
 
 const (
-	MQTT_3 = 3
+	MQTT_3     = 3
 	MQTT_3_1_1 = 4
-	MQTT_5 = 5
+	MQTT_5     = 5
 )
 
 type (
@@ -253,8 +253,11 @@ func ReadPacket(r io.Reader, args ...byte) (*ControlPacket, error) {
 	default:
 		protocolVersion = MQTT_5
 	}
-	
+
 	t := [1]byte{}
+	if r == nil {
+		return nil, fmt.Errorf("Nil pointer error")
+	}
 	_, err := io.ReadFull(r, t[:])
 	if err != nil {
 		return nil, err
@@ -532,14 +535,14 @@ func readString(b *bytes.Buffer) (string, error) {
 }
 
 func GetProtocolVersion(r io.Reader) (*ControlPacket, byte, error) {
-	
-	
 	t := [1]byte{}
+	if r == nil {
+		return nil, 0, fmt.Errorf("Nil pointer error")
+	}
 	_, err := io.ReadFull(r, t[:])
 	if err != nil {
 		return nil, 0, err
 	}
-	
 
 	pt := t[0] >> 4
 	cp := &ControlPacket{FixedHeader: FixedHeader{Type: pt}}
@@ -548,15 +551,13 @@ func GetProtocolVersion(r io.Reader) (*ControlPacket, byte, error) {
 		return nil, 0, fmt.Errorf("cannote determine protocol version from non CONNECT packet")
 	}
 
-	
 	cp.Content = &Connect{
 		ProtocolName:    "MQTT",
 		ProtocolVersion: 5,
-		Properties:      &Properties{}}
-
+		Properties:      &Properties{},
+	}
 
 	cp.Flags = t[0] & 0xF
-	
 
 	vbi, err := getVBI(r)
 	if err != nil {

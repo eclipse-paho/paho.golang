@@ -36,8 +36,10 @@ import (
 	"github.com/canonical/mqtt.golang/paho"
 )
 
-const shortDelay = 500 * time.Millisecond // Used when something should happen pretty quickly (increase when debugging)
-const longerDelay = time.Second           // Longer delay than above (for things like test wide context timeout)
+const (
+	shortDelay  = 500 * time.Millisecond // Used when something should happen pretty quickly (increase when debugging)
+	longerDelay = time.Second            // Longer delay than above (for things like test wide context timeout)
+)
 
 // When debugging uncomment the below (to prevent tests terminating too quickly)
 // const shortDelay = time.Hour
@@ -52,7 +54,6 @@ func TestMain(m *testing.M) {
 
 // TestConnect confirms that the computed CONNECT packet is as anticipated
 func TestConnect(t *testing.T) {
-
 }
 
 // TestDisconnect confirms that Disconnect closes the connection and exits cleanly
@@ -333,7 +334,8 @@ func TestBasicPubSub(t *testing.T) {
 						close(mrDone)
 					}
 					return true, nil
-				}},
+				},
+			},
 		},
 	}
 

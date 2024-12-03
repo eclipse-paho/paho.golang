@@ -199,7 +199,6 @@ func (cfg *ClientConfig) SetDisConnectPacketConfigurator(fn func() *paho.Disconn
 // buildConnectPacket constructs a Connect packet for the paho client, based on staged configuration.
 // If the program uses SetConnectPacketConfigurator, the provided callback will be executed with the preliminary Connect packet representation.
 func (cfg *ClientConfig) buildConnectPacket(firstConnection bool, serverURL *url.URL) (*paho.Connect, error) {
-
 	cp := &paho.Connect{
 		KeepAlive:  cfg.KeepAlive,
 		ClientID:   cfg.ClientID,

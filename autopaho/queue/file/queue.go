@@ -31,14 +31,12 @@ import (
 // Peek/DeQueue (could cache some of this in RAM, but there is a reasonable chance that the OS does this for us).
 
 const (
-	folderPermissions = os.FileMode(0770)
-	filePermissions   = os.FileMode(0666)
+	folderPermissions = os.FileMode(0o770)
+	filePermissions   = os.FileMode(0o666)
 	corruptExtension  = ".CORRUPT" // quarantined files will be given this extension
 )
 
-var (
-	maxTime = time.Unix(1<<63-62135596801, 999999999)
-)
+var maxTime = time.Unix(1<<63-62135596801, 999999999)
 
 // Queue - basic file based queue
 type Queue struct {
@@ -99,7 +97,6 @@ func New(path string, prefix string, extension string) (*Queue, error) {
 	}
 
 	return q, nil
-
 }
 
 // Wait returns a channel that will be closed when there is something in the queue

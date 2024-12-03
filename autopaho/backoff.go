@@ -81,7 +81,6 @@ func NewExponentialBackoff(
 	// computes the "moving" max value based on the given attempt by multiplying
 	// it with the factor and ensures it does not exceed the specified max value
 	computeMaxDelayForAttempt := func(attempt int) int64 {
-
 		// only "moving part",
 		// will be multiplied by "factor" up to the max value for each attempt
 		movingMaxMillis := initialMaxDelayMillis
@@ -122,10 +121,10 @@ func NewExponentialBackoff(
 //   - factor:             1.5
 func DefaultExponentialBackoff() Backoff {
 	return NewExponentialBackoff(
-		05*time.Second, // minDelay
-		10*time.Minute, // maxDelay
-		10*time.Second, // initialMaxDelay
-		1.5,            // factor
+		0o5*time.Second, // minDelay
+		10*time.Minute,  // maxDelay
+		10*time.Second,  // initialMaxDelay
+		1.5,             // factor
 	)
 }
 

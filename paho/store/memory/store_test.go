@@ -89,7 +89,6 @@ func TestMemoryStore(t *testing.T) {
 	if len(rids) != 0 {
 		t.Fatalf("reset did not clear store: %d", len(rids))
 	}
-
 }
 
 // TestMemoryStoreBig creates a fully populated Store and checks things work

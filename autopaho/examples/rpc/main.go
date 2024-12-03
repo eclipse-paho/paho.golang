@@ -108,7 +108,8 @@ func listener(ctx context.Context, cliCfg autopaho.ClientConfig, topic string, q
 				}
 			}
 			return true, nil
-		}}
+		},
+	}
 
 	_, err := autopaho.NewConnection(ctx, cliCfg)
 	if err != nil {
@@ -187,7 +188,8 @@ func main() {
 		func(p paho.PublishReceived) (bool, error) {
 			router.Route(p.Packet.Packet())
 			return false, nil
-		}}
+		},
+	}
 
 	cm, err := autopaho.NewConnection(ctx, cliCfg)
 	if err != nil {
@@ -209,7 +211,6 @@ func main() {
 		ResponseTopicFmt: "%s/responses",
 		ClientID:         cliCfg.ClientID,
 	})
-
 	if err != nil {
 		log.Fatal(err)
 	}

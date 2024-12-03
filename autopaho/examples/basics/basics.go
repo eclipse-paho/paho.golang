@@ -29,8 +29,10 @@ import (
 	"github.com/canonical/mqtt.golang/paho"
 )
 
-const clientID = "PahoGoClient" // Change this to something random if using a public test server
-const topic = "PahoGoTestTopic"
+const (
+	clientID = "PahoGoClient" // Change this to something random if using a public test server
+	topic    = "PahoGoTestTopic"
+)
 
 func main() {
 	// App will run until cancelled by user (e.g. ctrl-c)
@@ -77,7 +79,8 @@ func main() {
 				func(pr paho.PublishReceived) (bool, error) {
 					fmt.Printf("received message on topic %s; body: %s (retain: %t)\n", pr.Packet.Topic, pr.Packet.Payload, pr.Packet.Retain)
 					return true, nil
-				}},
+				},
+			},
 			OnClientError: func(err error) { fmt.Printf("client error: %s\n", err) },
 			OnServerDisconnect: func(d *paho.Disconnect) {
 				if d.Properties != nil {

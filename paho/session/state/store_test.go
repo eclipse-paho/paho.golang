@@ -75,7 +75,8 @@ func TestLoadExistingSession(t *testing.T) {
 		ProtocolName:    "MQTT",
 		ProtocolVersion: 5,
 		CleanStart:      false,
-		Properties:      &packets.Properties{ReceiveMaximum: &receiveMax}}
+		Properties:      &packets.Properties{ReceiveMaximum: &receiveMax},
+	}
 	if _, err := ccp.WriteTo(c); err != nil {
 		t.Fatalf("failed to send CONNECT packet: %s", err)
 	}

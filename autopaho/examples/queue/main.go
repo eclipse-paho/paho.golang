@@ -24,13 +24,15 @@ import (
 	"syscall"
 )
 
-const serverURL = "mqtt://127.0.0.1:1883"
-const testTopic = "testTopic" // We publish all messages to the same topic because the server should maintain message order
-const msgCount = 10000
-const NotifyEvery = 100
-const timeoutSecs = 60
-const QOS = 1
-const useMemoryQueue = false
+const (
+	serverURL      = "mqtt://127.0.0.1:1883"
+	testTopic      = "testTopic" // We publish all messages to the same topic because the server should maintain message order
+	msgCount       = 10000
+	NotifyEvery    = 100
+	timeoutSecs    = 60
+	QOS            = 1
+	useMemoryQueue = false
+)
 
 var disconnectAtCount = []uint64{5} // IThe connection will be dropped before publishing the message # in this slice
 

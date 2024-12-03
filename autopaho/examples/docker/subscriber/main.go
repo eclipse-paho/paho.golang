@@ -83,7 +83,8 @@ func main() {
 				func(pr paho.PublishReceived) (bool, error) {
 					h.handle(pr.Packet)
 					return true, nil
-				}},
+				},
+			},
 			OnClientError: func(err error) { fmt.Printf("client error: %s\n", err) },
 			OnServerDisconnect: func(d *paho.Disconnect) {
 				if d.Properties != nil {

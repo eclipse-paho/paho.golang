@@ -22,8 +22,7 @@ import (
 )
 
 // Pingreq is the Variable Header definition for a Pingreq control packet
-type Pingreq struct {
-}
+type Pingreq struct{}
 
 func (p *Pingreq) String() string {
 	return "PINGREQ"

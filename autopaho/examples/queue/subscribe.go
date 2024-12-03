@@ -111,7 +111,8 @@ func subscribe(ctx context.Context, serverURL *url.URL, msgCount uint64, ready c
 						}
 					}
 					return true, nil
-				}},
+				},
+			},
 			OnClientError: func(err error) { fmt.Printf("subscribe: client error: %s\n", err) },
 			OnServerDisconnect: func(d *paho.Disconnect) {
 				if d.Properties != nil {

@@ -64,7 +64,6 @@ func (s *Suback) Unpack(r *bytes.Buffer, protocolVersion *byte) error {
 		}
 	}
 
-
 	s.Reasons = r.Bytes()
 
 	return nil

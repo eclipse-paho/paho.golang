@@ -22,9 +22,7 @@ import (
 	"github.com/canonical/mqtt.golang/packets"
 )
 
-var (
-	ErrPacketNotFound = errors.New("packet not found")
-)
+var ErrPacketNotFound = errors.New("packet not found")
 
 type acksTracker struct {
 	mx    sync.Mutex
@@ -62,9 +60,7 @@ func (t *acksTracker) flush(do func([]*packets.Publish)) {
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
-	var (
-		buf []*packets.Publish
-	)
+	var buf []*packets.Publish
 	for _, v := range t.order {
 		if v.acknowledged {
 			buf = append(buf, v.pb)

@@ -63,7 +63,8 @@ func main() {
 				func(pr paho.PublishReceived) (bool, error) {
 					router.Route(pr.Packet.Packet())
 					return true, nil // we assume that the router handles all messages (todo: amend router API)
-				}},
+				},
+			},
 			OnClientError: func(err error) { fmt.Printf("client error: %s\n", err) },
 			OnServerDisconnect: func(d *paho.Disconnect) {
 				if d.Properties != nil {

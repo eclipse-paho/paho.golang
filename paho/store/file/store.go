@@ -27,8 +27,8 @@ import (
 )
 
 const (
-	folderPermissions = os.FileMode(0770)
-	filePermissions   = os.FileMode(0666)
+	folderPermissions = os.FileMode(0o770)
+	filePermissions   = os.FileMode(0o666)
 	tmpExtension      = ".tmp"
 	corruptExtension  = ".CORRUPT" // quarantined files will be given this extension
 )
@@ -72,7 +72,6 @@ func New(path string, prefix string, extension string) (*Store, error) {
 		prefix:    prefix,
 		extension: extension,
 	}, nil
-
 }
 
 // Store is an implementation of a Store that stores the data on disk

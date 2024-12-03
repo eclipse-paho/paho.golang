@@ -101,7 +101,6 @@ func (h *Handler) Request(ctx context.Context, pb *paho.Publish) (*paho.Publish,
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-
 }
 
 func (h *Handler) responseHandler(pb *paho.Publish) {
