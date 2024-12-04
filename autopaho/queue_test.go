@@ -30,7 +30,7 @@ import (
 
 	"github.com/canonical/mqtt.golang/autopaho/queue"
 	memqueue "github.com/canonical/mqtt.golang/autopaho/queue/memory"
-	"github.com/canonical/mqtt.golang/internal/testserver"
+	"github.com/canonical/mqtt.golang/mock/testserver"
 	"github.com/canonical/mqtt.golang/packets"
 	"github.com/canonical/mqtt.golang/paho"
 	paholog "github.com/canonical/mqtt.golang/paho/log"

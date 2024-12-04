@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/canonical/mqtt.golang/internal/basictestserver"
+	"github.com/canonical/mqtt.golang/mock/basictestserver"
 	"github.com/canonical/mqtt.golang/packets"
 	paholog "github.com/canonical/mqtt.golang/paho/log"
 	"github.com/google/go-cmp/cmp"

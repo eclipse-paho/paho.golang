@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/canonical/mqtt.golang/internal/testserver"
+	"github.com/canonical/mqtt.golang/mock/testserver"
 	"github.com/canonical/mqtt.golang/packets"
 	paholog "github.com/canonical/mqtt.golang/paho/log"
 	"github.com/canonical/mqtt.golang/paho/store/memory"
