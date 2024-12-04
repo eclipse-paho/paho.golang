@@ -30,7 +30,7 @@ type Logger interface {
 }
 
 type TestServer struct {
-	conn       net.Conn
+	ServerConn       net.Conn
 	clientConn net.Conn
 	stop       chan struct{}
 	done       chan struct{}
@@ -50,7 +50,7 @@ func New(logger Logger) *TestServer {
 		responses: make(map[byte]packets.Packet),
 		logger:    logger,
 	}
-	t.conn, t.clientConn = net.Pipe()
+	t.ServerConn, t.clientConn = net.Pipe()
 	if logger == nil {
 		t.logger = log.Default()
 	}
@@ -66,13 +66,13 @@ func (t *TestServer) SetResponse(pt byte, p packets.Packet) {
 }
 
 func (t *TestServer) SendPacket(p packets.Packet) error {
-	_, err := p.WriteTo(t.conn)
+	_, err := p.WriteTo(t.ServerConn)
 
 	return err
 }
 
 func (t *TestServer) Stop() {
-	t.conn.Close()
+	t.ServerConn.Close()
 	close(t.stop)
 	<-t.done
 }
@@ -82,10 +82,10 @@ func (t *TestServer) Run() {
 
 	incoming := make(chan *packets.ControlPacket, 65535)
 
-	// read incoming packets in a separate goroutine to avoid deadlocks due to unbuffered t.conn
+	// read incoming packets in a separate goroutine to avoid deadlocks due to unbuffered t.ServerConn
 	go func() {
 		for {
-			recv, err := packets.ReadPacket(t.conn, 5)
+			recv, err := packets.ReadPacket(t.ServerConn, 5)
 			if err != nil {
 				t.logger.Println("error in test server reading packet", err)
 				close(incoming)
@@ -108,7 +108,7 @@ func (t *TestServer) Run() {
 			case packets.CONNECT:
 				t.logger.Println("received", recv.Content.(*packets.Connect))
 				if p, ok := t.responses[packets.CONNACK]; ok {
-					if _, err := p.WriteTo(t.conn); err != nil {
+					if _, err := p.WriteTo(t.ServerConn); err != nil {
 						t.logger.Println(err)
 					}
 				}
@@ -116,7 +116,7 @@ func (t *TestServer) Run() {
 				t.logger.Println("received", recv.Content.(*packets.Subscribe))
 				if p, ok := t.responses[packets.SUBACK]; ok {
 					p.(*packets.Suback).PacketID = recv.PacketID()
-					if _, err := p.WriteTo(t.conn); err != nil {
+					if _, err := p.WriteTo(t.ServerConn); err != nil {
 						t.logger.Println(err)
 					}
 				}
@@ -124,7 +124,7 @@ func (t *TestServer) Run() {
 				t.logger.Println("received", recv.Content.(*packets.Unsubscribe))
 				if p, ok := t.responses[packets.UNSUBACK]; ok {
 					p.(*packets.Unsuback).PacketID = recv.PacketID()
-					if _, err := p.WriteTo(t.conn); err != nil {
+					if _, err := p.WriteTo(t.ServerConn); err != nil {
 						t.logger.Println(err)
 					}
 				}
@@ -132,7 +132,7 @@ func (t *TestServer) Run() {
 				t.logger.Println("received", recv.Content.(*packets.Auth))
 				if p, ok := t.responses[packets.AUTH]; ok {
 					t.logger.Println("sending auth")
-					if _, err := p.WriteTo(t.conn); err != nil {
+					if _, err := p.WriteTo(t.ServerConn); err != nil {
 						t.logger.Println(err)
 					}
 				}
@@ -142,7 +142,7 @@ func (t *TestServer) Run() {
 				case 1:
 					if p, ok := t.responses[packets.PUBACK]; ok {
 						p.(*packets.Puback).PacketID = recv.PacketID()
-						if _, err := p.WriteTo(t.conn); err != nil {
+						if _, err := p.WriteTo(t.ServerConn); err != nil {
 							t.logger.Println(err)
 						}
 					}
@@ -150,7 +150,7 @@ func (t *TestServer) Run() {
 					if p, ok := t.responses[packets.PUBREC]; ok {
 						p.(*packets.Pubrec).PacketID = recv.PacketID()
 						t.logger.Println("sending pubrec")
-						if _, err := p.WriteTo(t.conn); err != nil {
+						if _, err := p.WriteTo(t.ServerConn); err != nil {
 							t.logger.Println(err)
 						}
 						t.logger.Println("sent pubrec")
@@ -172,7 +172,7 @@ func (t *TestServer) Run() {
 				t.logger.Println("received", recv.Content.(*packets.Pubrec))
 				if p, ok := t.responses[packets.PUBREL]; ok {
 					p.(*packets.Pubrel).PacketID = recv.PacketID()
-					if _, err := p.WriteTo(t.conn); err != nil {
+					if _, err := p.WriteTo(t.ServerConn); err != nil {
 						t.logger.Println(err)
 					}
 				}
@@ -183,7 +183,7 @@ func (t *TestServer) Run() {
 				t.logger.Println("received", recv.Content.(*packets.Pubrel))
 				if p, ok := t.responses[packets.PUBCOMP]; ok {
 					p.(*packets.Pubcomp).PacketID = recv.PacketID()
-					if _, err := p.WriteTo(t.conn); err != nil {
+					if _, err := p.WriteTo(t.ServerConn); err != nil {
 						t.logger.Println(err)
 					}
 				}
@@ -192,7 +192,7 @@ func (t *TestServer) Run() {
 			case packets.PINGREQ:
 				t.logger.Println("test server sending pingresp")
 				pr := packets.NewControlPacket(packets.PINGRESP)
-				if _, err := pr.WriteTo(t.conn); err != nil {
+				if _, err := pr.WriteTo(t.ServerConn); err != nil {
 					t.logger.Println("error writing pingresp", err)
 				}
 			}
