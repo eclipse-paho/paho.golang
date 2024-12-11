@@ -185,7 +185,7 @@ func main() {
 	router := paho.NewStandardRouter()
 	cliCfg.OnPublishReceived = []func(paho.PublishReceived) (bool, error){
 		func(p paho.PublishReceived) (bool, error) {
-			router.Route(p.Packet.Packet())
+			router.Route(context.TODO(), p.Packet.Packet())
 			return false, nil
 		}}
 

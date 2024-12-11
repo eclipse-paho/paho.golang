@@ -69,7 +69,7 @@ type (
 		PingHandler   Pinger
 		defaultPinger bool
 
-		// Router - new inbound messages will be passed to the `Route(*packets.Publish)` function.
+		// Router - new inbound messages will be passed to the `Route(context.Context, *packets.Publish)` function.
 		//
 		// Depreciated: If a router is provided, it will now be added to the end of the OnPublishReceived
 		// slice (which provides a more flexible approach to handling incoming messages).
@@ -194,7 +194,7 @@ func NewClient(conf ClientConfig) *Client {
 		r := c.config.Router
 		c.onPublishReceived = append(c.onPublishReceived,
 			func(p PublishReceived) (bool, error) {
-				r.Route(p.Packet.Packet())
+				r.Route(context.TODO(), p.Packet.Packet())
 				return false, nil
 			})
 	}
@@ -443,9 +443,7 @@ func (c *Client) routePublishPackets() {
 		// Copy onPublishReceived so lock is only held briefly
 		c.onPublishReceivedMu.Lock()
 		handlers := make([]func(PublishReceived) (bool, error), len(c.onPublishReceived))
-		for i := range c.onPublishReceived {
-			handlers[i] = c.onPublishReceived[i]
-		}
+		copy(handlers, c.onPublishReceived)
 		c.onPublishReceivedMu.Unlock()
 
 		if c.config.EnableManualAcknowledgment && pb.QoS != 0 {
@@ -887,7 +885,7 @@ func (c *Client) publishQoS12(ctx context.Context, pb *packets.Publish, o Publis
 	}
 
 	// From this point on the message is in store, and ret will receive something regardless of whether we succeed in
-	// writing the packet to the connection
+	// writing the packet to the connection or not
 	if _, err := pb.WriteTo(c.config.Conn); err != nil {
 		c.debug.Printf("failed to write packet %d to connection: %s", pb.PacketID, err)
 		if o.Method == PublishMethod_AsyncSend {

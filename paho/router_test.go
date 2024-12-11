@@ -16,6 +16,7 @@
 package paho
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -94,36 +95,88 @@ func Test_routeSplit(t *testing.T) {
 func Test_routeDefault(t *testing.T) {
 	var r1Count, r2Count int
 
-	r1 := func(p *Publish) { r1Count++ }
-	r2 := func(p *Publish) { r2Count++ }
+	ctx := context.Background()
+	r1 := func(c context.Context, p *Publish) { r1Count++ }
+	r2 := func(c context.Context, p *Publish) { r2Count++ }
 
 	r := NewStandardRouter()
 	r.RegisterHandler("test", r1)
 
-	r.Route(&packets.Publish{Topic: "test", Properties: &packets.Properties{}})
+	r.Route(ctx, &packets.Publish{Topic: "test", Properties: &packets.Properties{}})
 	if r1Count != 1 {
 		t.Errorf("router1 should have been called r1: %d, r2: %d", r1Count, r2Count)
 	}
 	// Confirm that unset default does not cause issue
-	r.Route(&packets.Publish{Topic: "xxyy", Properties: &packets.Properties{}})
+	r.Route(ctx, &packets.Publish{Topic: "xxyy", Properties: &packets.Properties{}})
 	if r1Count != 1 {
 		t.Errorf("router1 should not have been called r1: %d, r2: %d", r1Count, r2Count)
 	}
 
 	r.DefaultHandler(r2)
-	r.Route(&packets.Publish{Topic: "test", Properties: &packets.Properties{}})
+	r.Route(ctx, &packets.Publish{Topic: "test", Properties: &packets.Properties{}})
 	if r1Count != 2 || r2Count != 0 {
 		t.Errorf("router1 should been called r1: %d, r2: %d", r1Count, r2Count)
 	}
-	r.Route(&packets.Publish{Topic: "xxyy", Properties: &packets.Properties{}})
+	r.Route(ctx, &packets.Publish{Topic: "xxyy", Properties: &packets.Properties{}})
 	if r1Count != 2 || r2Count != 1 {
 		t.Errorf("router2 should have been called r1: %d, r2: %d", r1Count, r2Count)
 	}
 
 	r.DefaultHandler(nil)
-	r.Route(&packets.Publish{Topic: "xxyy", Properties: &packets.Properties{}})
+	r.Route(ctx, &packets.Publish{Topic: "xxyy", Properties: &packets.Properties{}})
 	if r1Count != 2 || r2Count != 1 {
 		t.Errorf("no router should have been called r1: %d, r2: %d", r1Count, r2Count)
 	}
 
+}
+
+func Test_routeContextPropagation(t *testing.T) {
+	type ctxKey string
+	testKey := ctxKey("test-key")
+	testValue := "test-value"
+
+	var receivedValue string
+	handler := func(ctx context.Context, p *Publish) {
+		if v, ok := ctx.Value(testKey).(string); ok {
+			receivedValue = v
+		}
+	}
+
+	r := NewStandardRouter()
+	r.RegisterHandler("test/topic", handler)
+
+	// Create a context with a test value
+	ctx := context.WithValue(context.Background(), testKey, testValue)
+	
+	// Route a message with the context
+	r.Route(ctx, &packets.Publish{
+		Topic: "test/topic",
+		Properties: &packets.Properties{},
+	})
+
+	// Verify the context value was correctly propagated
+	if receivedValue != testValue {
+		t.Errorf("context value not propagated correctly, got: %v, want: %v", receivedValue, testValue)
+	}
+
+	// Test with a cancelled context
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	
+	var contextCancelled bool
+	cancelHandler := func(ctx context.Context, p *Publish) {
+		if ctx.Err() == context.Canceled {
+			contextCancelled = true
+		}
+	}
+
+	r.RegisterHandler("test/cancel", cancelHandler)
+	r.Route(cancelCtx, &packets.Publish{
+		Topic: "test/cancel",
+		Properties: &packets.Properties{},
+	})
+
+	if !contextCancelled {
+		t.Error("cancelled context was not properly propagated to handler")
+	}
 }

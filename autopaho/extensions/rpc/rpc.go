@@ -107,7 +107,7 @@ func (h *Handler) Request(ctx context.Context, pb *paho.Publish) (resp *paho.Pub
 	}
 }
 
-func (h *Handler) responseHandler(pb *paho.Publish) {
+func (h *Handler) responseHandler(ctx context.Context, pb *paho.Publish) {
 	if pb.Properties == nil || pb.Properties.CorrelationData == nil {
 		return
 	}

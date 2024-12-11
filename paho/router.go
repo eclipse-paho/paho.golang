@@ -16,6 +16,7 @@
 package paho
 
 import (
+	"context"
 	"strings"
 	"sync"
 
@@ -28,7 +29,7 @@ import (
 // MessageHandlers should complete quickly (start a go routine for
 // long-running processes) and should not call functions within the
 // paho instance that triggered them (due to potential deadlocks).
-type MessageHandler func(*Publish)
+type MessageHandler func(context.Context, *Publish)
 
 // Router is an interface of the functions for a struct that is
 // used to handle invoking MessageHandlers depending on the
@@ -42,7 +43,7 @@ type MessageHandler func(*Publish)
 type Router interface {
 	RegisterHandler(string, MessageHandler)
 	UnregisterHandler(string)
-	Route(*packets.Publish)
+	Route(context.Context, *packets.Publish)
 	SetDebugLogger(log.Logger)
 }
 
@@ -96,7 +97,7 @@ func (r *StandardRouter) UnregisterHandler(topic string) {
 
 // Route is the library provided StandardRouter's implementation
 // of the required interface function()
-func (r *StandardRouter) Route(pb *packets.Publish) {
+func (r *StandardRouter) Route(ctx context.Context, pb *packets.Publish) {
 	r.debug.Println("routing message for:", pb.Topic)
 	r.RLock()
 	defer r.RUnlock()
@@ -124,14 +125,14 @@ func (r *StandardRouter) Route(pb *packets.Publish) {
 		if match(route, topic) {
 			r.debug.Println("found handler for:", route)
 			for _, handler := range handlers {
-				handler(m)
+				handler(ctx, m)
 				handlerCalled = true
 			}
 		}
 	}
 
 	if !handlerCalled && r.defaultHandler != nil {
-		r.defaultHandler(m)
+		r.defaultHandler(ctx, m)
 	}
 }
 

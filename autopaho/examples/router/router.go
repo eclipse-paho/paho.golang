@@ -44,7 +44,9 @@ func main() {
 	}
 
 	router := paho.NewStandardRouter()
-	router.DefaultHandler(func(p *paho.Publish) { fmt.Printf("defaulthandler received message with topic: %s\n", p.Topic) })
+	router.DefaultHandler(func(c context.Context, p *paho.Publish) {
+		fmt.Printf("defaulthandler received message with topic: %s\n", p.Topic)
+	})
 
 	cliCfg := autopaho.ClientConfig{
 		ServerUrls: []*url.URL{u},
@@ -61,7 +63,7 @@ func main() {
 			// You can write the function(s) yourself or use the supplied Router
 			OnPublishReceived: []func(paho.PublishReceived) (bool, error){
 				func(pr paho.PublishReceived) (bool, error) {
-					router.Route(pr.Packet.Packet())
+					router.Route(context.TODO(), pr.Packet.Packet())
 					return true, nil // we assume that the router handles all messages (todo: amend router API)
 				}},
 			OnClientError: func(err error) { fmt.Printf("client error: %s\n", err) },
@@ -96,10 +98,16 @@ func main() {
 
 	// Handlers can be registered/deregistered at any time. It's important to note that you need to subscribe AND create
 	// a handler
-	router.RegisterHandler("test/test/#", func(p *paho.Publish) { fmt.Printf("test/test/# received message with topic: %s\n", p.Topic) })
-	router.RegisterHandler("test/test/foo", func(p *paho.Publish) { fmt.Printf("test/test/foo received message with topic: %s\n", p.Topic) })
-	router.RegisterHandler("test/nomatch", func(p *paho.Publish) { fmt.Printf("test/nomatch received message with topic: %s\n", p.Topic) })
-	router.RegisterHandler("test/quit", func(p *paho.Publish) { stop() }) // Context will be cancelled if we receive a matching message
+	router.RegisterHandler("test/test/#", func(c context.Context, p *paho.Publish) {
+		fmt.Printf("test/test/# received message with topic: %s\n", p.Topic)
+	})
+	router.RegisterHandler("test/test/foo", func(c context.Context, p *paho.Publish) {
+		fmt.Printf("test/test/foo received message with topic: %s\n", p.Topic)
+	})
+	router.RegisterHandler("test/nomatch", func(c context.Context, p *paho.Publish) {
+		fmt.Printf("test/nomatch received message with topic: %s\n", p.Topic)
+	})
+	router.RegisterHandler("test/quit", func(c context.Context, p *paho.Publish) { stop() }) // Context will be cancelled if we receive a matching message
 
 	// We publish three messages to test out the various route handlers
 	topics := []string{"test/test", "test/test/foo", "test/xxNoMatch", "test/quit"}
