@@ -102,7 +102,7 @@ func (h *Handler) Request(ctx context.Context, pb *paho.Publish) (resp *paho.Pub
 	select {
 	case <-ctx.Done():
 		_ = h.getCorrelIDChan(string(pb.Properties.CorrelationData))
-		return nil, fmt.Errorf("context ended")
+		return nil, ctx.Err()
 	case resp = <-rChan:
 		return resp, nil
 	}
