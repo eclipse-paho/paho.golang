@@ -828,7 +828,8 @@ const (
 // PublishOptions enables the behaviour of Publish to be modified
 type PublishOptions struct {
 	// Method enables a degree of control over how  PublishWithOptions operates
-	Method PublishMethod
+	Method            PublishMethod
+	AsyncCompleteChan chan packets.ControlPacket
 }
 
 // PublishWithOptions is used to send a publication to the MQTT server (with options to customise its behaviour)
@@ -881,8 +882,12 @@ func (c *Client) publishQoS12(ctx context.Context, pb *packets.Publish, o Publis
 	c.debug.Println("sending QoS12 message")
 	pubCtx, cf := context.WithTimeout(ctx, c.config.PacketTimeout)
 	defer cf()
-
-	ret := make(chan packets.ControlPacket, 1)
+	var ret chan packets.ControlPacket
+	if o.AsyncCompleteChan == nil {
+		ret = make(chan packets.ControlPacket, 1)
+	} else {
+		ret = o.AsyncCompleteChan
+	}
 	if err := c.config.Session.AddToSession(pubCtx, pb, ret); err != nil {
 		return nil, err
 	}
@@ -900,7 +905,6 @@ func (c *Client) publishQoS12(ctx context.Context, pb *packets.Publish, o Publis
 	if o.Method == PublishMethod_AsyncSend {
 		return nil, nil // Async send, so we don't wait for the response (may add callbacks in the future to enable user to obtain status)
 	}
-
 	var resp packets.ControlPacket
 	select {
 	case <-pubCtx.Done():
@@ -909,7 +913,10 @@ func (c *Client) publishQoS12(ctx context.Context, pb *packets.Publish, o Publis
 		return nil, ctxErr
 	case resp = <-ret:
 	}
+	return c.ProcessPublishResponse(resp, pb)
+}
 
+func (c *Client) ProcessPublishResponse(resp packets.ControlPacket, pb *packets.Publish) (*PublishResponse, error) {
 	if resp.Type == 0 { // default ControlPacket indicates we are shutting down
 		return nil, errors.New("PUBLISH transmitted but not fully acknowledged at time of shutdown")
 	}
