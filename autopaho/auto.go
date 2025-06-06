@@ -61,6 +61,8 @@ type PublishReceived struct {
 	ConnectionManager *ConnectionManager
 }
 
+type PublishCompleteCallback func(*paho.PublishResponse, error)
+
 // ClientConfig adds a few values, required to manage the connection, to the standard paho.ClientConfig (note that
 // conn will be ignored)
 type ClientConfig struct {
@@ -130,6 +132,9 @@ type ConnectionManager struct {
 
 	debug  log.Logger // By default set to NOOPLogger{},set to a logger for debugging info
 	errors log.Logger // By default set to NOOPLogger{},set to a logger for errors
+
+	callbackMap map[uint16]PublishCompleteCallback
+	callbackMu  sync.Mutex // protects the callbackmap
 }
 
 // ResetUsernamePassword clears any configured username and password on the client configuration
@@ -472,6 +477,7 @@ func (c *ConnectionManager) Publish(ctx context.Context, p *paho.Publish) (*paho
 // without breaking existing code
 type QueuePublish struct {
 	*paho.Publish
+	OnComplete PublishCompleteCallback
 }
 
 // PublishViaQueue is used to send a publication to the MQTT server via a queue (by default memory based).
@@ -490,7 +496,19 @@ func (c *ConnectionManager) PublishViaQueue(ctx context.Context, p *QueuePublish
 	if _, err := p.Packet().WriteTo(&b); err != nil {
 		return err
 	}
-	return c.queue.Enqueue(&b)
+	err := c.queue.Enqueue(&b)
+	if err != nil {
+		return err
+	}
+
+	// If a callback is provided, we need to track this publish
+	if p.OnComplete != nil {
+		c.callbackMu.Lock()
+		c.callbackMap[p.PacketID] = p.OnComplete
+		c.callbackMu.Unlock()
+	}
+
+	return nil
 }
 
 // TerminateConnectionForTest closes the active connection (if any). This function is intended for testing only, it
@@ -617,20 +635,26 @@ connectionLoop:
 					Payload:  pub.Payload,
 				}
 				pub2.InitProperties(pub.Properties)
+				asyncCompleteChan := make(chan packets.ControlPacket, 1)
 
 				// PublishWithOptions using PublishMethod_AsyncSend will block until the packet has been transmitted
 				// and then return (at this point any pub1+ publish will be in the session so will be retried)
 				c.debug.Printf("publishing message from queue with topic %s", pub2.Topic)
-				if _, err = cli.PublishWithOptions(ctx, &pub2, paho.PublishOptions{Method: paho.PublishMethod_AsyncSend}); err != nil {
+				var resp, pubErr = cli.PublishWithOptions(ctx, &pub2, paho.PublishOptions{Method: paho.PublishMethod_AsyncSend, AsyncCompleteChan: asyncCompleteChan})
+				if pubErr != nil {
 					c.errors.Printf("error publishing from queue: %s", err)
 					if errors.Is(err, paho.ErrInvalidArguments) { // Some errors should not be retried
 						if err := entry.Remove(); err != nil {
 							c.errors.Printf("error removing queue entry: %s", err)
+						} else {
+							go c.executeCallbackAndRemove(pub2.PacketID, resp, pubErr)
 						}
 						// Need a way to notify the user of this
 					} else if errors.Is(err, paho.ErrNetworkErrorAfterStored) { // Message in session so remove from queue
 						if err := entry.Remove(); err != nil {
 							c.errors.Printf("error removing queue entry: %s", err)
+						} else {
+							go c.handleAsyncCompletion(ctx, asyncCompleteChan, &pub2)
 						}
 					} else {
 						if err := entry.Leave(); err != nil { // the message was not sent, so leave it in the queue
@@ -653,8 +677,36 @@ connectionLoop:
 				if err := entry.Remove(); err != nil { // successfully published
 					c.errors.Printf("error removing queue entry: %s", err)
 					continue
+				} else if resp != nil {
+					go c.executeCallbackAndRemove(pub2.PacketID, resp, pubErr)
+				} else {
+					go c.handleAsyncCompletion(ctx, asyncCompleteChan, &pub2)
 				}
 			}
 		}
+	}
+}
+
+func (c *ConnectionManager) handleAsyncCompletion(ctx context.Context, asyncCompleteChan chan packets.ControlPacket, pub *paho.Publish) {
+	select {
+	case asyncResp := <-asyncCompleteChan:
+		c.debug.Printf("Async publish completed for topic %s", pub.Topic)
+		resp, pubError := c.cli.ProcessPublishResponse(asyncResp, pub.Packet())
+		c.executeCallbackAndRemove(pub.PacketID, resp, pubError)
+	case <-ctx.Done():
+		c.debug.Printf("Context cancelled while waiting for async publish completion for topic %s", pub.Topic)
+		c.executeCallbackAndRemove(pub.PacketID, nil, ctx.Err())
+	}
+}
+
+func (c *ConnectionManager) executeCallbackAndRemove(packetID uint16, resp *paho.PublishResponse, err error) {
+	c.callbackMu.Lock()
+	onComplete, ok := c.callbackMap[packetID]
+	if ok {
+		delete(c.callbackMap, packetID)
+		c.callbackMu.Unlock()
+		onComplete(resp, err)
+	} else {
+		c.callbackMu.Unlock()
 	}
 }
