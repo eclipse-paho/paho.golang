@@ -490,7 +490,8 @@ func (c *ConnectionManager) PublishViaQueue(ctx context.Context, p *QueuePublish
 	if _, err := p.Packet().WriteTo(&b); err != nil {
 		return err
 	}
-	return c.queue.Enqueue(&b)
+	_, err := c.queue.Enqueue(&b)
+	return err
 }
 
 // TerminateConnectionForTest closes the active connection (if any). This function is intended for testing only, it
@@ -580,7 +581,7 @@ connectionLoop:
 					time.Sleep(1 * time.Second)
 					continue
 				}
-				r, err := entry.Reader()
+				_, r, err := entry.Reader()
 				if err != nil {
 					c.errors.Printf("error retrieving reader for queue entry: %s", err)
 					if err := entry.Leave(); err != nil {
