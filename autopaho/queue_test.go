@@ -86,7 +86,7 @@ func TestQueuedMessages(t *testing.T) {
 
 	// Add a corrupt item to the queue (zero bytes) - this should be logged and ignored
 	q := memqueue.New()
-	if err := q.Enqueue(bytes.NewReader(nil)); err != nil {
+	if _, err := q.Enqueue(bytes.NewReader(nil)); err != nil {
 		t.Fatalf("failed to add corrupt zero byte item to queue")
 	}
 
@@ -303,7 +303,7 @@ func TestPreloadPublish(t *testing.T) {
 			w.Close()
 		}()
 
-		if err := q.Enqueue(r); err != nil {
+		if _, err := q.Enqueue(r); err != nil {
 			t.Fatalf("failed to enqueue: %s", err)
 		}
 	}
