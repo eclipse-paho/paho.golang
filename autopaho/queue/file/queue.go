@@ -20,10 +20,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/eclipse/paho.golang/autopaho/queue"
+	"github.com/google/uuid"
 )
 
 // A queue implementation that stores all data on disk
@@ -122,10 +124,10 @@ func (q *Queue) WaitForEmpty() chan struct{} {
 }
 
 // Enqueue add item to the queue.
-func (q *Queue) Enqueue(p io.Reader) error {
+func (q *Queue) Enqueue(p io.Reader) (uuid.UUID, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	err := q.put(p)
+	id, err := q.put(p)
 	if err == nil && q.queueEmpty {
 		q.queueEmpty = false
 		for _, c := range q.waiting {
@@ -133,7 +135,7 @@ func (q *Queue) Enqueue(p io.Reader) error {
 		}
 		q.waiting = q.waiting[:0]
 	}
-	return err
+	return id, err
 }
 
 // Peek retrieves the oldest item from the queue (without removing it)
@@ -156,23 +158,24 @@ func (q *Queue) Peek() (queue.Entry, error) {
 }
 
 // put writes out an item to disk
-func (q *Queue) put(p io.Reader) error {
-	// Use CreateTemp to generate a file with a unique name (it will be removed when packet has been transmitted)
-	f, err := os.CreateTemp(q.path, q.prefix+"*"+q.extension)
+func (q *Queue) put(p io.Reader) (uuid.UUID, error) {
+	id := uuid.New()
+	// Create a file with a unique name, it will be removed when packet has been transmitted
+	f, err := os.Create(filepath.Join(q.path, q.prefix+id.String()+q.extension))
 	if err != nil {
-		return err
+		return uuid.Nil, err
 	}
 
 	if _, err = io.Copy(f, p); err != nil {
 		f.Close()
 		_ = os.Remove(f.Name()) // Attempt to remove the partial file (not much we can do if this fails)
-		return err
+		return uuid.Nil, err
 	}
 	if err = f.Close(); err != nil {
 		_ = os.Remove(f.Name()) // Attempt to remove the partial file (not much we can do if this fails)
-		return err
+		return uuid.Nil, err
 	}
-	return nil
+	return id, nil
 }
 
 // get() returns a ReadCloser that accesses the oldest file available
@@ -186,7 +189,16 @@ func (q *Queue) get() (entry, error) {
 	if err != nil {
 		return entry{}, err
 	}
-	return entry{f: f}, nil
+
+	// Extract UUID from filename
+	fileNameUUID := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(fn), q.prefix), q.extension)
+	uuid, err := uuid.Parse(fileNameUUID)
+	if err != nil {
+		f.Close()
+		return entry{}, fmt.Errorf("failed to parse UUID from filename: %w", err)
+	}
+
+	return entry{f: f, uuid: uuid}, nil
 }
 
 // oldestEntry returns the filename of the oldest entry in the queue (if any - io.EOF means none)
@@ -229,12 +241,13 @@ func (q *Queue) oldestEntry() (string, error) {
 
 // entry is used to return a queue entry from Peek
 type entry struct {
-	f *os.File
+	f    *os.File
+	uuid uuid.UUID
 }
 
-// Reader provides access to the file contents
-func (e entry) Reader() (io.Reader, error) {
-	return e.f, nil
+// Reader provides access to the id and file contents
+func (e entry) Reader() (uuid.UUID, io.Reader, error) {
+	return e.uuid, e.f, nil
 }
 
 // Leave closes the entry leaving it in the queue (will be returned on subsequent calls to Peek)

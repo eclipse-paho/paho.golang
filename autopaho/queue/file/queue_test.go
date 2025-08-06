@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/eclipse/paho.golang/autopaho/queue"
+	"github.com/google/uuid"
 )
 
 // TestFileQueue some basic tests of the queue
@@ -50,7 +51,8 @@ func TestFileQueue(t *testing.T) {
 	default:
 	}
 	testEntry := []byte("This is a test")
-	if err := q.Enqueue(bytes.NewReader(testEntry)); err != nil {
+	_, err = q.Enqueue(bytes.NewReader(testEntry))
+	if err != nil {
 		t.Fatalf("error adding to queue: %s", err)
 	}
 	select {
@@ -61,7 +63,7 @@ func TestFileQueue(t *testing.T) {
 
 	const entryFormat = "Queue entry %d for testing"
 	for i := 0; i < 10; i++ {
-		if err := q.Enqueue(bytes.NewReader([]byte(fmt.Sprintf(entryFormat, i)))); err != nil {
+		if _, err := q.Enqueue(bytes.NewReader([]byte(fmt.Sprintf(entryFormat, i)))); err != nil {
 			t.Fatalf("error adding entry %d: %s", i, err)
 		}
 		time.Sleep(time.Nanosecond) // Short delay due to file system time resolution
@@ -78,9 +80,12 @@ func TestFileQueue(t *testing.T) {
 		if err != nil {
 			t.Fatalf("error peeking entry %d: %s", i, err)
 		}
-		r, err := entry.Reader()
+		id, r, err := entry.Reader()
 		if err != nil {
 			t.Fatalf("error getting reader for entry %d: %s", i, err)
+		}
+		if id == uuid.Nil {
+			t.Fatalf("expected non-nil UUID for entry %d", i)
 		}
 		buf := &bytes.Buffer{}
 		if _, err = buf.ReadFrom(r); err != nil {
@@ -114,7 +119,8 @@ func TestLeaveAndError(t *testing.T) {
 	}
 
 	testEntry := []byte("This is a test")
-	if err := q.Enqueue(bytes.NewReader(testEntry)); err != nil {
+	_, err = q.Enqueue(bytes.NewReader(testEntry))
+	if err != nil {
 		t.Fatalf("error adding to queue: %s", err)
 	}
 
