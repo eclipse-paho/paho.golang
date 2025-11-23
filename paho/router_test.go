@@ -16,6 +16,7 @@
 package paho
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -125,5 +126,82 @@ func Test_routeDefault(t *testing.T) {
 	if r1Count != 2 || r2Count != 1 {
 		t.Errorf("no router should have been called r1: %d, r2: %d", r1Count, r2Count)
 	}
+}
 
+func Test_routeContext(t *testing.T) {
+	var r1Count, r2Count int
+	var executionOrder []string
+
+	r1 := func(ctx context.Context, p *Publish) {
+		r1Count++
+		executionOrder = append(executionOrder, "r1")
+	}
+	r2 := func(ctx context.Context, p *Publish) {
+		r2Count++
+		executionOrder = append(executionOrder, "r2")
+	}
+
+	// Middleware to test ordering
+	middleware1 := func(next MessageContextHandler) MessageContextHandler {
+		return func(ctx context.Context, p *Publish) {
+			executionOrder = append(executionOrder, "m1-before")
+			next(ctx, p)
+			executionOrder = append(executionOrder, "m1-after")
+		}
+	}
+
+	middleware2 := func(next MessageContextHandler) MessageContextHandler {
+		return func(ctx context.Context, p *Publish) {
+			executionOrder = append(executionOrder, "m2-before")
+			next(ctx, p)
+			executionOrder = append(executionOrder, "m2-after")
+		}
+	}
+
+	r := NewStandardContextRouter()
+	r.RegisterHandler("test", r1)
+
+	r.Route(&packets.Publish{Topic: "test", Properties: &packets.Properties{}})
+	if r1Count != 1 {
+		t.Errorf("router1 should have been called r1: %d, r2: %d", r1Count, r2Count)
+	}
+	// Confirm that unset default does not cause issue
+	r.Route(&packets.Publish{Topic: "xxyy", Properties: &packets.Properties{}})
+	if r1Count != 1 {
+		t.Errorf("router1 should not have been called r1: %d, r2: %d", r1Count, r2Count)
+	}
+
+	r.DefaultHandler(r2)
+	r.Route(&packets.Publish{Topic: "test", Properties: &packets.Properties{}})
+	if r1Count != 2 || r2Count != 0 {
+		t.Errorf("router1 should been called r1: %d, r2: %d", r1Count, r2Count)
+	}
+	r.Route(&packets.Publish{Topic: "xxyy", Properties: &packets.Properties{}})
+	if r1Count != 2 || r2Count != 1 {
+		t.Errorf("router2 should have been called r1: %d, r2: %d", r1Count, r2Count)
+	}
+
+	r.DefaultHandler(nil)
+	r.Route(&packets.Publish{Topic: "xxyy", Properties: &packets.Properties{}})
+	if r1Count != 2 || r2Count != 1 {
+		t.Errorf("no router should have been called r1: %d, r2: %d", r1Count, r2Count)
+	}
+
+	// Test middleware
+	executionOrder = []string{}
+	r = NewStandardContextRouter()
+	r.Use(middleware1)
+	r.Use(middleware2)
+	r.RegisterHandler("test", r1)
+
+	r.Route(&packets.Publish{Topic: "test", Properties: &packets.Properties{}})
+	if r1Count != 3 {
+		t.Errorf("router1 should have been called with middleware r1: %d", r1Count)
+	}
+
+	// Check middleware ordering: middleware1 -> middleware2 -> handler -> middleware2 -> middleware1
+	expectedOrder := []string{"m1-before", "m2-before", "r1", "m2-after", "m1-after"}
+	if !reflect.DeepEqual(executionOrder, expectedOrder) {
+		t.Errorf("middleware execution order incorrect, got: %v, want: %v", executionOrder, expectedOrder)
+	}
 }
