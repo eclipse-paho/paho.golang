@@ -75,11 +75,6 @@ type (
 		// slice (which provides a more flexible approach to handling incoming messages).
 		Router Router
 
-		// ContextRouter is an alternative message router that receives context.Context along with the message.
-		// It is used when Router is not set, allowing context-aware message handling for operations
-		// that require context propagation, cancellation, or timeout control.
-		ContextRouter ContextRouter
-
 		// OnPublishReceived provides a slice of callbacks; additional handlers may be added after the client has been
 		// created via the AddOnPublishReceived function (Client holds a copy of the slice; OnPublishReceived will not change).
 		// When a `PUBLISH` is received, the callbacks will be called in order. If a callback processes the message,
@@ -197,13 +192,6 @@ func NewClient(conf ClientConfig) *Client {
 	}
 	if c.config.Router != nil {
 		r := c.config.Router
-		c.onPublishReceived = append(c.onPublishReceived,
-			func(p PublishReceived) (bool, error) {
-				r.Route(p.Packet.Packet())
-				return false, nil
-			})
-	} else if c.config.ContextRouter != nil {
-		r := c.config.ContextRouter
 		c.onPublishReceived = append(c.onPublishReceived,
 			func(p PublishReceived) (bool, error) {
 				r.Route(p.Packet.Packet())

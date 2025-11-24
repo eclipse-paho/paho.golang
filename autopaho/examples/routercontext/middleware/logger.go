@@ -6,9 +6,10 @@ import (
 	"time"
 
 	"github.com/eclipse/paho.golang/paho"
+	"github.com/eclipse/paho.golang/paho/extensions/routercontext"
 )
 
-func Logger(next paho.MessageContextHandler) paho.MessageContextHandler {
+func Logger(next routercontext.Handler) routercontext.Handler {
 	return func(ctx context.Context, p *paho.Publish) {
 		start := time.Now()
 		next(ctx, p)

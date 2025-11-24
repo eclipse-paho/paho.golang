@@ -27,6 +27,7 @@ import (
 	"github.com/eclipse/paho.golang/autopaho"
 	"github.com/eclipse/paho.golang/autopaho/examples/routercontext/middleware"
 	"github.com/eclipse/paho.golang/paho"
+	"github.com/eclipse/paho.golang/paho/extensions/routercontext"
 )
 
 const clientID = "PahoGoClient" // Change this to something random if using a public test server
@@ -45,7 +46,7 @@ func main() {
 		panic(err)
 	}
 
-	router := paho.NewStandardContextRouter()
+	router := routercontext.NewRouter()
 
 	// Registering middleware handlers
 	router.Use(middleware.Logger)
