@@ -167,7 +167,7 @@ func main() {
 			ClientID: "my-client",
 			OnPublishReceived: []func(paho.PublishReceived) (bool, error){
 				func(pr paho.PublishReceived) (bool, error) {
-					router.Route(pr.Packet.Packet())
+					router.Route(context.Background(), pr.Packet)
 					return true, nil
 				},
 			},
@@ -205,7 +205,7 @@ func main() {
 		Conn: serverConn,
 		OnPublishReceived: []func(paho.PublishReceived) (bool, error){
 			func(pr paho.PublishReceived) (bool, error) {
-				router.Route(pr.Packet.Packet())
+				router.Route(context.Background(), pr.Packet)
 				return true, nil
 			},
 		},
@@ -231,8 +231,8 @@ Removes all handlers registered for the given topic pattern.
 #### `Use(middleware ...Middleware)`
 Registers middleware to wrap all handlers. Middleware are applied in order.
 
-#### `Route(pb *packets.Publish)`
-Routes a Publish packet to all matching handlers. Called internally by the MQTT client.
+#### `Route(ctx context.Context, pb *packets.Publish)`
+Routes a Publish packet to all matching handlers. The context is passed to handlers for cancellation and timeout control.
 
 #### `DefaultHandler(handler Handler)`
 Sets a handler to be called for messages that don't match any registered topic pattern. Pass `nil` to unset.
@@ -264,13 +264,13 @@ See the `autopaho/examples/routercontext/` directory for complete working exampl
 
 ## Performance Considerations
 
-1. **Lock Contention**: The router uses `sync.RWMutex` for thread-safety. Most operations use read locks except for registration/unregistration.
+1. **Thread-Safety**: The router uses `sync.RWMutex` for thread-safety, allowing concurrent reads during routing while protecting writes during registration.
 
-2. **Topic Matching**: Topic matching involves string splitting and recursive pattern comparison. For high-throughput scenarios, prefer more specific topic patterns.
+2. **Lock Contention**: Most operations use read locks except for registration/unregistration. High-frequency registrations may cause contention.
 
-3. **Middleware Overhead**: Each middleware adds a function call overhead. Register only necessary middleware.
+3. **Topic Matching**: Topic matching involves string splitting and recursive pattern comparison. For high-throughput scenarios, prefer more specific topic patterns.
 
-4. **Context Creation**: A background context is created for each message. For high-frequency scenarios, consider context pooling.
+4. **Middleware Overhead**: Each middleware adds a function call overhead. Register only necessary middleware.
 
 ## Best Practices
 

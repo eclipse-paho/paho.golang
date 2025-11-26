@@ -87,14 +87,15 @@ func (r *Router) Use(m ...Middleware) {
 
 // Route routes a Publish message to all matching handlers based on topic subscription patterns.
 // Handlers are called with a background context. Topic aliases are resolved and cached.
-func (r *Router) Route(pb *packets.Publish) {
+func (r *Router) Route(ctx context.Context, pb *packets.Publish) {
 	r.debug.Println("routing message for:", pb.Topic)
 	r.RLock()
 	defer r.RUnlock()
 
 	m := paho.PublishFromPacketPublish(pb)
-
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	var topic string
 	if pb.Properties.TopicAlias != nil {
@@ -117,14 +118,16 @@ func (r *Router) Route(pb *packets.Publish) {
 		if match(route, topic) {
 			r.debug.Println("found handler for:", route)
 			for _, handler := range handlers {
-				r.wrapHandler(handler)(ctx, m)
+				wrapped := r.wrapHandler(handler)
+				wrapped(ctx, m)
 				handlerCalled = true
 			}
 		}
 	}
 
 	if !handlerCalled && r.defaultHandler != nil {
-		r.wrapHandler(r.defaultHandler)(ctx, m)
+		wrapped := r.wrapHandler(r.defaultHandler)
+		wrapped(ctx, m)
 	}
 }
 

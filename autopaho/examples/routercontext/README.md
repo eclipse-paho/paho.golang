@@ -29,7 +29,7 @@ autopaho.ClientConfig{
         ClientID: "my-client",
         OnPublishReceived: []func(paho.PublishReceived) (bool, error){
             func(pr paho.PublishReceived) (bool, error) {
-                router.Route(pr.Packet.Packet())
+                router.Route(ctx, pr.Packet.Packet())
                 return true, nil
             },
         },
@@ -44,22 +44,22 @@ Register handlers for specific topic patterns:
 ```go
 // Exact topic match
 router.RegisterHandler("test/test", func(ctx context.Context, p *paho.Publish) {
-    slog.InfoContext(ctx, fmt.Sprintf("Received message on test/test: %s", string(p.Payload)))
+    slog.InfoContext(ctx, "received message on test/test", slog.String("topic", p.Topic))
 })
 
 // Single-level wildcard (+)
 router.RegisterHandler("test/+/status", func(ctx context.Context, p *paho.Publish) {
-    slog.InfoContext(ctx, fmt.Sprintf("Status update: %s", p.Topic))
+    slog.InfoContext(ctx, "status update", slog.String("topic", p.Topic))
 })
 
 // Multi-level wildcard (#)
 router.RegisterHandler("test/test/#", func(ctx context.Context, p *paho.Publish) {
-    slog.InfoContext(ctx, fmt.Sprintf("test/test/# received message with topic: %s", p.Topic))
+    slog.InfoContext(ctx, "test/test/# received message", slog.String("topic", p.Topic))
 })
 
 // Default handler for unmatched topics
 router.DefaultHandler(func(ctx context.Context, p *paho.Publish) {
-    slog.InfoContext(ctx, fmt.Sprintf("Default handler received message with topic: %s", p.Topic))
+    slog.InfoContext(ctx, "default handler - no matching topic", slog.String("topic", p.Topic))
 })
 ```
 
@@ -84,7 +84,7 @@ Dynamically register and unregister handlers:
 ```go
 // Register a new handler
 router.RegisterHandler("sensors/temperature", func(ctx context.Context, p *paho.Publish) {
-    slog.InfoContext(ctx, fmt.Sprintf("Temperature reading: %s", string(p.Payload)))
+    slog.InfoContext(ctx, "temperature reading", slog.String("payload", string(p.Payload)))
 })
 
 // Unregister a handler
@@ -92,7 +92,7 @@ router.UnregisterHandler("test/test/#")
 
 // Update default handler
 router.DefaultHandler(func(ctx context.Context, p *paho.Publish) {
-    slog.InfoContext(ctx, fmt.Sprintf("New default handler: %s", p.Topic))
+    slog.InfoContext(ctx, "new default handler", slog.String("topic", p.Topic))
 })
 ```
 

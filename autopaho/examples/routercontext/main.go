@@ -53,10 +53,10 @@ func main() {
 	router.Use(middleware.Recoverer)
 
 	router.DefaultHandler(func(ctx context.Context, p *paho.Publish) {
-		slog.InfoContext(ctx, fmt.Sprintf("defaulthandler received message with topic: %s", p.Topic))
+		slog.InfoContext(ctx, "default handler - no matching topic", slog.String("topic", p.Topic))
 	})
 
-	cliCfg := autopaho.ClientConfig{
+	clientCfg := autopaho.ClientConfig{
 		ServerUrls: []*url.URL{u},
 		KeepAlive:  20, // Keepalive message should be sent every 20 seconds
 		// We don't want the broker to delete any session info when we disconnect
@@ -71,7 +71,7 @@ func main() {
 			// You can write the function(s) yourself or use the supplied Router
 			OnPublishReceived: []func(paho.PublishReceived) (bool, error){
 				func(pr paho.PublishReceived) (bool, error) {
-					router.Route(pr.Packet.Packet())
+					router.Route(ctx, pr.Packet.Packet())
 					return true, nil // we assume that the router handles all messages (todo: amend router API)
 				}},
 			OnClientError: func(err error) { fmt.Printf("client error: %s\n", err) },
@@ -85,7 +85,7 @@ func main() {
 		},
 	}
 
-	c, err := autopaho.NewConnection(ctx, cliCfg) // starts process; will reconnect until context cancelled
+	c, err := autopaho.NewConnection(ctx, clientCfg) // starts process; will reconnect until context cancelled
 	if err != nil {
 		panic(err)
 	}
@@ -107,16 +107,16 @@ func main() {
 	// Handlers can be registered/deregistered at any time. It's important to note that you need to subscribe AND create
 	// a handler
 	router.RegisterHandler("test/test/#", func(ctx context.Context, p *paho.Publish) {
-		slog.InfoContext(ctx, fmt.Sprintf("test/test/# received message with topic: %s", p.Topic))
+		slog.InfoContext(ctx, "test/test/# received message", slog.String("topic", p.Topic))
 	})
 	router.RegisterHandler("test/test/foo", func(ctx context.Context, p *paho.Publish) {
-		slog.InfoContext(ctx, fmt.Sprintf("test/test/foo received message with topic: %s", p.Topic))
+		slog.InfoContext(ctx, "test/test/foo received message", slog.String("topic", p.Topic))
 	})
 	router.RegisterHandler("test/nomatch", func(ctx context.Context, p *paho.Publish) {
-		slog.InfoContext(ctx, fmt.Sprintf("test/nomatch received message with topic: %s", p.Topic))
+		slog.InfoContext(ctx, "test/nomatch received message", slog.String("topic", p.Topic))
 	})
 	router.RegisterHandler("test/panic", func(ctx context.Context, p *paho.Publish) {
-		slog.InfoContext(ctx, fmt.Sprintf("test/panic received message with topic: %s", p.Topic))
+		slog.InfoContext(ctx, "test/panic received message", slog.String("topic", p.Topic))
 		panic("This is a panic!")
 	})
 	router.RegisterHandler("test/quit", func(_ context.Context, p *paho.Publish) { stop() }) // Context will be cancelled if we receive a matching message

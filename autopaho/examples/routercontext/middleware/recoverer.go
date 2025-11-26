@@ -13,7 +13,7 @@ func Recoverer(next routercontext.Handler) routercontext.Handler {
 	return func(ctx context.Context, p *paho.Publish) {
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Println("Recovered in f", r)
+				fmt.Println("Recovered from panic:", r)
 				debug.PrintStack()
 			}
 		}()
