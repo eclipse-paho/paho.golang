@@ -82,17 +82,23 @@ func (p *Puback) Unpack(r *bytes.Buffer) error {
 }
 
 // Buffers is the implementation of the interface required function for a packet
-func (p *Puback) Buffers() net.Buffers {
+func (p *Puback) Buffers() (net.Buffers, error) {
 	var b bytes.Buffer
 	writeUint16(p.PacketID, &b)
 	b.WriteByte(p.ReasonCode)
-	idvp := p.Properties.Pack(PUBACK)
-	propLen := encodeVBI(len(idvp))
+	idvp, err := p.Properties.Pack(PUBACK)
+	if err != nil {
+		return nil, err
+	}
+	propLen, err := encodeVBI(len(idvp))
+	if err != nil {
+		return nil, err
+	}
 	n := net.Buffers{b.Bytes(), propLen}
 	if len(idvp) > 0 {
 		n = append(n, idvp)
 	}
-	return n
+	return n, nil
 }
 
 // WriteTo is the implementation of the interface required function for a packet

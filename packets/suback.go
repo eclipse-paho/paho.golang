@@ -68,12 +68,18 @@ func (s *Suback) Unpack(r *bytes.Buffer) error {
 }
 
 // Buffers is the implementation of the interface required function for a packet
-func (s *Suback) Buffers() net.Buffers {
+func (s *Suback) Buffers() (net.Buffers, error) {
 	var b bytes.Buffer
 	writeUint16(s.PacketID, &b)
-	idvp := s.Properties.Pack(SUBACK)
-	propLen := encodeVBI(len(idvp))
-	return net.Buffers{b.Bytes(), propLen, idvp, s.Reasons}
+	idvp, err := s.Properties.Pack(SUBACK)
+	if err != nil {
+		return nil, err
+	}
+	propLen, err := encodeVBI(len(idvp))
+	if err != nil {
+		return nil, err
+	}
+	return net.Buffers{b.Bytes(), propLen, idvp, s.Reasons}, nil
 }
 
 // WriteTo is the implementation of the interface required function for a packet

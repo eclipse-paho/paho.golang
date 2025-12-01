@@ -243,11 +243,11 @@ func (p *Properties) String() string {
 
 // Pack takes all the defined properties for an Properties and produces
 // a slice of bytes representing the wire format for the information
-func (i *Properties) Pack(p byte) []byte {
+func (i *Properties) Pack(p byte) ([]byte, error) {
 	var b bytes.Buffer
 
 	if i == nil {
-		return nil
+		return nil, nil // nothing to write
 	}
 
 	if p == PUBLISH {
@@ -285,7 +285,9 @@ func (i *Properties) Pack(p byte) []byte {
 	if p == PUBLISH || p == SUBSCRIBE {
 		if i.SubscriptionIdentifier != nil {
 			b.WriteByte(PropSubscriptionIdentifier)
-			encodeVBIdirect(*i.SubscriptionIdentifier, &b)
+			if err := encodeVBIdirect(*i.SubscriptionIdentifier, &b); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -404,18 +406,18 @@ func (i *Properties) Pack(p byte) []byte {
 		writeString(v.Value, &b)
 	}
 
-	return b.Bytes()
+	return b.Bytes(), nil
 }
 
 // PackBuf will create a bytes.Buffer of the packed properties, it
 // will only pack the properties appropriate to the packet type p
 // even though other properties may exist, it will silently ignore
 // them
-func (i *Properties) PackBuf(p byte) *bytes.Buffer {
+func (i *Properties) PackBuf(p byte) (*bytes.Buffer, error) {
 	var b bytes.Buffer
 
 	if i == nil {
-		return nil
+		return nil, nil
 	}
 
 	if p == PUBLISH {
@@ -453,7 +455,9 @@ func (i *Properties) PackBuf(p byte) *bytes.Buffer {
 	if p == PUBLISH || p == SUBSCRIBE {
 		if i.SubscriptionIdentifier != nil {
 			b.WriteByte(PropSubscriptionIdentifier)
-			encodeVBIdirect(*i.SubscriptionIdentifier, &b)
+			if err := encodeVBIdirect(*i.SubscriptionIdentifier, &b); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -572,7 +576,7 @@ func (i *Properties) PackBuf(p byte) *bytes.Buffer {
 		writeString(v.Value, &b)
 	}
 
-	return &b
+	return &b, nil
 }
 
 // Unpack takes a buffer of bytes and reads out the defined properties

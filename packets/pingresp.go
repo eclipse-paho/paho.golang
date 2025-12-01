@@ -35,8 +35,8 @@ func (p *Pingresp) Unpack(r *bytes.Buffer) error {
 }
 
 // Buffers is the implementation of the interface required function for a packet
-func (p *Pingresp) Buffers() net.Buffers {
-	return nil
+func (p *Pingresp) Buffers() (net.Buffers, error) {
+	return nil, nil
 }
 
 // WriteTo is the implementation of the interface required function for a packet

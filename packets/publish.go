@@ -76,15 +76,20 @@ func (p *Publish) Unpack(r *bytes.Buffer) error {
 }
 
 // Buffers is the implementation of the interface required function for a packet
-func (p *Publish) Buffers() net.Buffers {
+func (p *Publish) Buffers() (net.Buffers, error) {
 	var b bytes.Buffer
 	writeString(p.Topic, &b)
 	if p.QoS > 0 {
 		_ = writeUint16(p.PacketID, &b)
 	}
-	idvp := p.Properties.Pack(PUBLISH)
-	encodeVBIdirect(len(idvp), &b)
-	return net.Buffers{b.Bytes(), idvp, p.Payload}
+	idvp, err := p.Properties.Pack(PUBLISH)
+	if err != nil {
+		return nil, err
+	}
+	if err := encodeVBIdirect(len(idvp), &b); err != nil {
+		return nil, err
+	}
+	return net.Buffers{b.Bytes(), idvp, p.Payload}, nil
 
 }
 

@@ -17,6 +17,7 @@ package packets
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -52,7 +53,7 @@ type (
 	// Packet is the interface defining the unique parts of a controlpacket
 	Packet interface {
 		Unpack(*bytes.Buffer) error
-		Buffers() net.Buffers
+		Buffers() (net.Buffers, error)
 		WriteTo(io.Writer) (int64, error)
 	}
 
@@ -87,10 +88,15 @@ func NewThreadSafeConn(c net.Conn) net.Conn {
 // WriteTo operates on a FixedHeader and takes the option values and produces
 // the wire format byte that represents these.
 func (f *FixedHeader) WriteTo(w io.Writer) (int64, error) {
+	vbi, err := encodeVBI(f.remainingLength)
+	if err != nil {
+		return 0, err
+	}
+
 	if _, err := w.Write([]byte{byte(f.Type)<<4 | f.Flags}); err != nil {
 		return 0, err
 	}
-	if _, err := w.Write(encodeVBI(f.remainingLength)); err != nil {
+	if _, err := w.Write(vbi); err != nil {
 		return 0, err
 	}
 
@@ -329,7 +335,10 @@ func ReadPacket(r io.Reader) (*ControlPacket, error) {
 // a control packet.
 func (c *ControlPacket) WriteTo(w io.Writer) (int64, error) {
 	c.remainingLength = 0 // ignore previous remainingLength (if any)
-	buffers := c.Content.Buffers()
+	buffers, err := c.Content.Buffers()
+	if err != nil {
+		return 0, err
+	}
 	for _, b := range buffers {
 		c.remainingLength += len(b)
 	}
@@ -360,7 +369,12 @@ func (c *ControlPacket) WriteTo(w io.Writer) (int64, error) {
 	return buffers.WriteTo(w)
 }
 
-func encodeVBI(length int) []byte {
+// encodeVBI - Encodes Variable Byte Integer (as per spec clause 1.5.5)
+func encodeVBI(length int) ([]byte, error) {
+	// Spec states max packet size is 268,435,455 bytes. Sending length outside this range is invalid.
+	if length < 0 || length > 268435455 {
+		return nil, errors.New("invalid VBI length")
+	}
 	var x int
 	b := [4]byte{}
 	for {
@@ -372,12 +386,17 @@ func encodeVBI(length int) []byte {
 		b[x] = digit
 		x++
 		if length == 0 {
-			return b[:x]
+			return b[:x], nil
 		}
 	}
 }
 
-func encodeVBIdirect(length int, buf *bytes.Buffer) {
+// encodeVBIdirect - Writes length of Variable Byte Integer to buffer (as per spec clause 1.5.5)
+func encodeVBIdirect(length int, buf *bytes.Buffer) error {
+	// Spec states max packet size is 268,435,455 bytes. Sending length outside this range is invalid.
+	if length < 0 || length > 268435455 {
+		return errors.New("invalid VBI length")
+	}
 	var x int
 	b := [4]byte{}
 	for {
@@ -390,11 +409,12 @@ func encodeVBIdirect(length int, buf *bytes.Buffer) {
 		x++
 		if length == 0 {
 			buf.Write(b[:x])
-			return
+			return nil
 		}
 	}
 }
 
+// getVBI - retrieves Variable Byte Integer from reader (as per spec clause 1.5.5)
 func getVBI(r io.Reader) (*bytes.Buffer, error) {
 	var ret bytes.Buffer
 	digit := [1]byte{}
@@ -407,9 +427,13 @@ func getVBI(r io.Reader) (*bytes.Buffer, error) {
 		if digit[0] <= 0x7f {
 			return &ret, nil
 		}
+		if ret.Len() > 3 { // Max bytes in length is 4, 4th byte must hot have high bit set
+			return nil, errors.New("malformed Variable Byte Integer")
+		}
 	}
 }
 
+// decodeVBI - Variable Byte Integer as per spec clause 1.5.5
 func decodeVBI(r *bytes.Buffer) (int, error) {
 	var vbi uint32
 	var multiplier uint32
@@ -423,6 +447,9 @@ func decodeVBI(r *bytes.Buffer) (int, error) {
 			break
 		}
 		multiplier += 7
+		if multiplier >= 27 {
+			return 0, errors.New("malformed Variable Byte Integer") // maximum of 4 bytes may be used (see example in spec)
+		}
 	}
 	return int(vbi), nil
 }
