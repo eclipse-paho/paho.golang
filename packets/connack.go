@@ -80,7 +80,7 @@ func (c *Connack) Unpack(r *bytes.Buffer) error {
 }
 
 // Buffers is the implementation of the interface required function for a packet
-func (c *Connack) Buffers() net.Buffers {
+func (c *Connack) Buffers() (net.Buffers, error) {
 	var header bytes.Buffer
 
 	if c.SessionPresent {
@@ -90,15 +90,21 @@ func (c *Connack) Buffers() net.Buffers {
 	}
 	header.WriteByte(c.ReasonCode)
 
-	idvp := c.Properties.Pack(CONNACK)
-	propLen := encodeVBI(len(idvp))
+	idvp, err := c.Properties.Pack(CONNACK)
+	if err != nil {
+		return nil, err
+	}
+	propLen, err := encodeVBI(len(idvp))
+	if err != nil {
+		return nil, err
+	}
 
 	n := net.Buffers{header.Bytes(), propLen}
 	if len(idvp) > 0 {
 		n = append(n, idvp)
 	}
 
-	return n
+	return n, nil
 }
 
 // WriteTo is the implementation of the interface required function for a packet

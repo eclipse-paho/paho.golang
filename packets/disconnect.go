@@ -87,14 +87,20 @@ func (d *Disconnect) Unpack(r *bytes.Buffer) error {
 }
 
 // Buffers is the implementation of the interface required function for a packet
-func (d *Disconnect) Buffers() net.Buffers {
-	idvp := d.Properties.Pack(DISCONNECT)
-	propLen := encodeVBI(len(idvp))
+func (d *Disconnect) Buffers() (net.Buffers, error) {
+	idvp, err := d.Properties.Pack(DISCONNECT)
+	if err != nil {
+		return nil, err
+	}
+	propLen, err := encodeVBI(len(idvp))
+	if err != nil {
+		return nil, err
+	}
 	n := net.Buffers{[]byte{d.ReasonCode}, propLen}
 	if len(idvp) > 0 {
 		n = append(n, idvp)
 	}
-	return n
+	return n, nil
 }
 
 // WriteTo is the implementation of the interface required function for a packet

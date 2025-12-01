@@ -63,12 +63,18 @@ func (u *Unsuback) Unpack(r *bytes.Buffer) error {
 }
 
 // Buffers is the implementation of the interface required function for a packet
-func (u *Unsuback) Buffers() net.Buffers {
+func (u *Unsuback) Buffers() (net.Buffers, error) {
 	var b bytes.Buffer
 	writeUint16(u.PacketID, &b)
-	idvp := u.Properties.Pack(UNSUBACK)
-	propLen := encodeVBI(len(idvp))
-	return net.Buffers{b.Bytes(), propLen, idvp, u.Reasons}
+	idvp, err := u.Properties.Pack(UNSUBACK)
+	if err != nil {
+		return nil, err
+	}
+	propLen, err := encodeVBI(len(idvp))
+	if err != nil {
+		return nil, err
+	}
+	return net.Buffers{b.Bytes(), propLen, idvp, u.Reasons}, nil
 }
 
 // WriteTo is the implementation of the interface required function for a packet

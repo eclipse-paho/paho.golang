@@ -30,14 +30,16 @@ import (
 )
 
 func TestEncodeVBI127(t *testing.T) {
-	b := encodeVBI(127)
+	b, err := encodeVBI(127)
+	require.NoError(t, err)
 
 	require.Len(t, b, 1)
 	assert.Equal(t, byte(127), b[0])
 }
 
 func TestEncodeVBI128(t *testing.T) {
-	b := encodeVBI(128)
+	b, err := encodeVBI(128)
+	require.NoError(t, err)
 
 	require.Len(t, b, 2)
 	assert.Equal(t, byte(0x80), b[0])
@@ -45,7 +47,8 @@ func TestEncodeVBI128(t *testing.T) {
 }
 
 func TestEncodeVBI16383(t *testing.T) {
-	b := encodeVBI(16383)
+	b, err := encodeVBI(16383)
+	require.NoError(t, err)
 
 	require.Len(t, b, 2)
 	assert.Equal(t, byte(0xff), b[0])
@@ -53,7 +56,8 @@ func TestEncodeVBI16383(t *testing.T) {
 }
 
 func TestEncodeVBI16384(t *testing.T) {
-	b := encodeVBI(16384)
+	b, err := encodeVBI(16384)
+	require.NoError(t, err)
 
 	require.Len(t, b, 3)
 	assert.Equal(t, byte(0x80), b[0])
@@ -62,7 +66,8 @@ func TestEncodeVBI16384(t *testing.T) {
 }
 
 func TestEncodeVBI2097151(t *testing.T) {
-	b := encodeVBI(2097151)
+	b, err := encodeVBI(2097151)
+	require.NoError(t, err)
 
 	require.Len(t, b, 3)
 	assert.Equal(t, byte(0xff), b[0])
@@ -71,7 +76,8 @@ func TestEncodeVBI2097151(t *testing.T) {
 }
 
 func TestEncodeVBI2097152(t *testing.T) {
-	b := encodeVBI(2097152)
+	b, err := encodeVBI(2097152)
+	require.NoError(t, err)
 
 	require.Len(t, b, 4)
 	assert.Equal(t, byte(0x80), b[0])
@@ -81,13 +87,24 @@ func TestEncodeVBI2097152(t *testing.T) {
 }
 
 func TestEncodeVBIMax(t *testing.T) {
-	b := encodeVBI(268435455)
+	b, err := encodeVBI(268435455)
+	require.NoError(t, err)
 
 	require.Len(t, b, 4)
 	assert.Equal(t, byte(0xff), b[0])
 	assert.Equal(t, byte(0xff), b[1])
 	assert.Equal(t, byte(0xff), b[2])
 	assert.Equal(t, byte(0x7f), b[3])
+}
+
+func TestEncodeVBIMaxPlus1(t *testing.T) {
+	_, err := encodeVBI(268435456)
+	require.Error(t, err)
+}
+
+func TestEncodeVBIdirectMaxPlus1(t *testing.T) {
+	err := encodeVBIdirect(268435456, nil) // nil buffer OK as nothing should be written to it
+	require.ErrorContains(t, err, "invalid VBI length")
 }
 
 func TestDecodeVBI12(t *testing.T) {
@@ -121,7 +138,14 @@ func TestDecodeVBIMax(t *testing.T) {
 	require.Nil(t, err)
 	assert.Equal(t, 268435455, x)
 }
-
+func TestDecodeVBIMaxPlus1(t *testing.T) {
+	_, err := decodeVBI(bytes.NewBuffer([]byte{0xff, 0xff, 0xff, 0x80}))
+	require.Error(t, err)
+}
+func TestDecodeGetVBIMaxPlus1(t *testing.T) {
+	_, err := getVBI(bytes.NewBuffer([]byte{0xff, 0xff, 0xff, 0x80}))
+	require.ErrorContains(t, err, "malformed Variable Byte Integer")
+}
 func TestNewControlPacketConnect(t *testing.T) {
 	var b bytes.Buffer
 	x := NewControlPacket(CONNECT)

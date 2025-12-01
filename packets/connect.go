@@ -166,21 +166,31 @@ func (c *Connect) Unpack(r *bytes.Buffer) error {
 }
 
 // Buffers is the implementation of the interface required function for a packet
-func (c *Connect) Buffers() net.Buffers {
+func (c *Connect) Buffers() (net.Buffers, error) {
 	var cp bytes.Buffer
 
 	writeString(c.ProtocolName, &cp)
 	cp.WriteByte(c.ProtocolVersion)
 	cp.WriteByte(c.PackFlags())
 	writeUint16(c.KeepAlive, &cp)
-	idvp := c.Properties.Pack(CONNECT)
-	encodeVBIdirect(len(idvp), &cp)
+	idvp, err := c.Properties.Pack(CONNECT)
+	if err != nil {
+		return nil, err
+	}
+	if err = encodeVBIdirect(len(idvp), &cp); err != nil {
+		return nil, err
+	}
 	cp.Write(idvp)
 
 	writeString(c.ClientID, &cp)
 	if c.WillFlag {
-		willIdvp := c.WillProperties.Pack(CONNECT)
-		encodeVBIdirect(len(willIdvp), &cp)
+		willIdvp, err := c.WillProperties.Pack(CONNECT)
+		if err != nil {
+			return nil, err
+		}
+		if err = encodeVBIdirect(len(willIdvp), &cp); err != nil {
+			return nil, err
+		}
 		cp.Write(willIdvp)
 		writeString(c.WillTopic, &cp)
 		writeBinary(c.WillMessage, &cp)
@@ -192,7 +202,7 @@ func (c *Connect) Buffers() net.Buffers {
 		writeBinary(c.Password, &cp)
 	}
 
-	return net.Buffers{cp.Bytes()}
+	return net.Buffers{cp.Bytes()}, nil
 }
 
 // WriteTo is the implementation of the interface required function for a packet

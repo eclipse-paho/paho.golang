@@ -129,7 +129,7 @@ func (s *Subscribe) Unpack(r *bytes.Buffer) error {
 }
 
 // Buffers is the implementation of the interface required function for a packet
-func (s *Subscribe) Buffers() net.Buffers {
+func (s *Subscribe) Buffers() (net.Buffers, error) {
 	var b bytes.Buffer
 	writeUint16(s.PacketID, &b)
 	var subs bytes.Buffer
@@ -137,9 +137,15 @@ func (s *Subscribe) Buffers() net.Buffers {
 		writeString(o.Topic, &subs)
 		subs.WriteByte(o.Pack())
 	}
-	idvp := s.Properties.Pack(SUBSCRIBE)
-	propLen := encodeVBI(len(idvp))
-	return net.Buffers{b.Bytes(), propLen, idvp, subs.Bytes()}
+	idvp, err := s.Properties.Pack(SUBSCRIBE)
+	if err != nil {
+		return nil, err
+	}
+	propLen, err := encodeVBI(len(idvp))
+	if err != nil {
+		return nil, err
+	}
+	return net.Buffers{b.Bytes(), propLen, idvp, subs.Bytes()}, nil
 }
 
 // WriteTo is the implementation of the interface required function for a packet

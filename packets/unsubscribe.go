@@ -71,16 +71,22 @@ func (u *Unsubscribe) Unpack(r *bytes.Buffer) error {
 }
 
 // Buffers is the implementation of the interface required function for a packet
-func (u *Unsubscribe) Buffers() net.Buffers {
+func (u *Unsubscribe) Buffers() (net.Buffers, error) {
 	var b bytes.Buffer
 	writeUint16(u.PacketID, &b)
 	var topics bytes.Buffer
 	for _, t := range u.Topics {
 		writeString(t, &topics)
 	}
-	idvp := u.Properties.Pack(UNSUBSCRIBE)
-	propLen := encodeVBI(len(idvp))
-	return net.Buffers{b.Bytes(), propLen, idvp, topics.Bytes()}
+	idvp, err := u.Properties.Pack(UNSUBSCRIBE)
+	if err != nil {
+		return nil, err
+	}
+	propLen, err := encodeVBI(len(idvp))
+	if err != nil {
+		return nil, err
+	}
+	return net.Buffers{b.Bytes(), propLen, idvp, topics.Bytes()}, nil
 }
 
 // WriteTo is the implementation of the interface required function for a packet
