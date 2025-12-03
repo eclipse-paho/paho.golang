@@ -313,18 +313,16 @@ func ReadPacket(r io.Reader) (*ControlPacket, error) {
 		return nil, err
 	}
 
-	var content bytes.Buffer
-	content.Grow(cp.remainingLength)
-
-	n, err := io.CopyN(&content, r, int64(cp.remainingLength))
+	b := make([]byte, cp.remainingLength)
+	n, err := io.ReadFull(r, b)
 	if err != nil {
 		return nil, err
 	}
 
-	if n != int64(cp.remainingLength) {
+	if n != cp.remainingLength {
 		return nil, fmt.Errorf("failed to read packet, expected %d bytes, read %d", cp.remainingLength, n)
 	}
-	err = cp.Content.Unpack(&content)
+	err = cp.Content.Unpack(bytes.NewBuffer(b))
 	if err != nil {
 		return nil, err
 	}
@@ -530,13 +528,12 @@ func readBinary(b *bytes.Buffer) ([]byte, error) {
 		return nil, err
 	}
 
-	var s bytes.Buffer
-	s.Grow(int(size))
-	if _, err := io.CopyN(&s, b, int64(size)); err != nil {
+	s := make([]byte, size)
+	if _, err := io.ReadFull(b, s); err != nil {
 		return nil, err
 	}
 
-	return s.Bytes(), nil
+	return s, nil
 }
 
 func readString(b *bytes.Buffer) (string, error) {
