@@ -47,17 +47,17 @@ func NewConstantBackoff(delay time.Duration) Backoff {
 // exponentially for each attempt up to the specified max value.
 //
 // The "moving" max is computed by multiplying the initial max value with the
-// factor for each attemt up the specified max value.
+// factor for each attempt up to the specified max value.
 //
 // Configuration parameters:
 //   - minDelay        - lower bound for computed backoff
 //   - maxDelay        - upper bound for computed backoff
-//   - initialMaxDelay - initial max value which wiil incerease exponentially up to the max delay
+//   - initialMaxDelay - initial max value which will increase exponentially up to the max delay
 //   - factor          - factor for the exponential increase of initial max delay
 func NewExponentialBackoff(
 	minDelay time.Duration, // lower bound for computed backoff
 	maxDelay time.Duration, // upper bound for computed backoff
-	initialMaxDelay time.Duration, // initial max value which wiil incerease exponentially up to the max delay
+	initialMaxDelay time.Duration, // initial max value which will increase exponentially up to the max delay
 	factor float32, // factor for the exponential increase of initial max delay
 ) Backoff {
 	if minDelay <= 0 {
@@ -86,7 +86,7 @@ func NewExponentialBackoff(
 		// will be multiplied by "factor" up to the max value for each attempt
 		movingMaxMillis := initialMaxDelayMillis
 
-		// computaion is based on 1 as 0 is the backoff for the first attempt
+		// computation is based on 1 as 0 is the backoff for the first attempt
 		for i := 1; i < attempt; i++ {
 			movingMaxMillis = int64(float32(movingMaxMillis) * factor)
 			// ensure we stay in range
