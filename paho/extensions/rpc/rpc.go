@@ -76,11 +76,22 @@ func (h *Handler) getCorrelIDChan(cID string) chan *paho.Publish {
 	return rChan
 }
 
+func (h *Handler) removeCorrelID(cID string) {
+	h.Lock()
+	defer h.Unlock()
+
+	delete(h.correlData, cID)
+}
+
 func (h *Handler) Request(ctx context.Context, pb *paho.Publish) (*paho.Publish, error) {
 	cID := fmt.Sprintf("%d", time.Now().UnixNano())
 	rChan := make(chan *paho.Publish, 1) // Buffered to prevent goroutine leak when context cancelled
 
 	h.addCorrelID(cID, rChan)
+	// Ensure the correlation entry is always removed. responseHandler only
+	// removes it when a matching response arrives, so without this a request
+	// that times out, is cancelled, or fails to publish leaks a map entry.
+	defer h.removeCorrelID(cID)
 
 	if pb.Properties == nil {
 		pb.Properties = &paho.PublishProperties{}
