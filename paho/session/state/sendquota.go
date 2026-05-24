@@ -46,16 +46,21 @@ var ErrUnexpectedRelease = errors.New("release called when quota at initial valu
 
 // newSendQuota creates a new tracker limited to quota concurrent messages
 func newSendQuota(quota uint16) *sendQuota {
-	w := &sendQuota{initialQuota: quota, quota: quota}
+	w := &sendQuota{initialQuota: int(quota), quota: int(quota)}
 	return w
 }
 
 // sendQuota provides a way to bound concurrent access to a resource.
 // The callers can request access with a given weight.
+//
+// quota is a signed counter: Retransmit (noWait) decrements it without blocking, so on a
+// reconnect that retransmits more stored messages than the receive maximum it can legitimately
+// go negative (over-allocated). It must therefore be a signed type — a uint16 here would wrap to
+// a large value, permanently defeating the receive-maximum bound and breaking Release.
 type sendQuota struct {
 	mu           sync.Mutex
-	initialQuota uint16
-	quota        uint16
+	initialQuota int
+	quota        int
 	waiters      []chan<- struct{} // using a slice because would generally expect this to be small
 }
 
