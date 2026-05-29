@@ -225,3 +225,40 @@ func TestQuotaLoad(t *testing.T) {
 		t.Fatalf("expected waiters to be empty: %v", it.waiters)
 	}
 }
+
+// TestQuotaRetransmitDoesNotUnderflow is a regression test: on reconnect the session
+// retransmits each stored (unacknowledged) message via Retransmit, which decrements the
+// quota without blocking. If more messages are stored than the receive maximum, the quota
+// must go negative (over-allocated) rather than wrapping around. With the previous uint16
+// quota it underflowed to a huge value, so Release returned ErrUnexpectedRelease and the
+// receive-maximum bound was permanently lost.
+func TestQuotaRetransmitDoesNotUnderflow(t *testing.T) {
+	t.Parallel()
+
+	const receiveMax = 2
+	it := newSendQuota(receiveMax)
+
+	// Retransmit one more message than the receive maximum allows.
+	for i := 0; i < receiveMax+1; i++ {
+		if err := it.Retransmit(); err != nil {
+			t.Fatalf("Retransmit %d: %v", i, err)
+		}
+	}
+
+	// Releasing the (over-allocated) slots must succeed and bring the quota back to its
+	// initial value. If the quota had underflowed, Release would return ErrUnexpectedRelease.
+	for i := 0; i < receiveMax+1; i++ {
+		if err := it.Release(); err != nil {
+			t.Fatalf("Release %d returned %v; quota underflowed instead of going negative", i, err)
+		}
+	}
+
+	if it.quota != receiveMax {
+		t.Fatalf("expected quota restored to %d, got %d", receiveMax, it.quota)
+	}
+
+	// Back at the initial value: a further Release is unexpected.
+	if err := it.Release(); err != ErrUnexpectedRelease {
+		t.Fatalf("expected ErrUnexpectedRelease at initial quota, got %v", err)
+	}
+}
