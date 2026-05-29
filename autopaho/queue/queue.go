@@ -38,6 +38,7 @@ type Entry interface {
 type Queue interface {
 	// Wait returns a channel that is closed when there is something in the queue (will return a closed channel if the
 	// queue is empty at the time of the call)
+	// Can be called multiple times.
 	Wait() chan struct{}
 
 	// Enqueue add item to the queue.
