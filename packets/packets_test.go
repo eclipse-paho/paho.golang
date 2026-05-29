@@ -120,18 +120,21 @@ func TestDecodeVBI127(t *testing.T) {
 	require.Nil(t, err)
 	assert.Equal(t, 127, x)
 }
+
 func TestDecodeVBI128(t *testing.T) {
 	x, err := decodeVBI(bytes.NewBuffer([]byte{0x80, 0x01}))
 
 	require.Nil(t, err)
 	assert.Equal(t, 128, x)
 }
+
 func TestDecodeVBI16384(t *testing.T) {
 	x, err := decodeVBI(bytes.NewBuffer([]byte{0x80, 0x80, 0x01}))
 
 	require.Nil(t, err)
 	assert.Equal(t, 16384, x)
 }
+
 func TestDecodeVBIMax(t *testing.T) {
 	x, err := decodeVBI(bytes.NewBuffer([]byte{0xff, 0xff, 0xff, 0x7f}))
 
@@ -436,7 +439,8 @@ func TestControlPacket_PacketID(t *testing.T) {
 				Content:     &Unsuback{PacketID: 123},
 			},
 			want: 123,
-		}, {
+		},
+		{
 			name: "connect",
 			fields: fields{
 				FixedHeader: FixedHeader{Type: CONNECT},
@@ -539,4 +543,30 @@ func TestNewThreadSafeWrapper(t *testing.T) {
 	if _, ok := ts.(sync.Locker); !ok {
 		t.Error("NewThreadSafeConn does not implement sync.Locker")
 	}
+}
+
+func BenchmarkReadPacket(b *testing.B) {
+	benchmarkPacket := func(b *testing.B, name string, p Packet) {
+		b.Run(name, func(b *testing.B) {
+			buf := bytes.Buffer{}
+			_, err := p.WriteTo(&buf)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for b.Loop() {
+				_, err := ReadPacket(bytes.NewReader(buf.Bytes()))
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+	benchmarkPacket(b, "small", &Puback{})
+	benchmarkPacket(b, "large", &Auth{
+		Properties: &Properties{
+			AuthMethod: "foo",
+			AuthData:   bytes.Repeat([]byte{123}, 1024),
+		},
+		ReasonCode: AuthReauthenticate,
+	})
 }
