@@ -127,3 +127,18 @@ func Test_routeDefault(t *testing.T) {
 	}
 
 }
+
+// Issue #331 - Route had a data race around it's handling of topic aliases
+func Test_routeAliasRace(t *testing.T) {
+
+	// Data race possible when an alias is set
+	r := NewStandardRouter()
+	alias := uint16(1)
+
+	for i := 0; i < 2; i++ {
+		go func() {
+			r.Route(&packets.Publish{Topic: "test", Properties: &packets.Properties{TopicAlias: &alias}})
+			r.Route(&packets.Publish{Properties: &packets.Properties{TopicAlias: &alias}})
+		}()
+	}
+}
