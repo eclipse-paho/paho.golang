@@ -112,7 +112,7 @@ type Instance struct {
 	packetReceived  func(publish *packets.ControlPacket) error      // Will be called when a packet is received (return error to drop connection)
 	overrideConnAck func(cp *packets.Connect, cap *packets.Connack) // Will be called before CONNECT response transmitted, cap can be modified
 
-	// Below are not thread-safe (should only be accessed after checking connected)
+	// Variables below are not thread-safe (should only be accessed after checking connected)
 	connPktDone           bool                    // true if we have processed a CONNECT packet (ever!)
 	sessionPresent        bool                    // true if a session exists
 	sessionExpiryInterval uint32                  // as set on the most recent `connect` (we treat anything >0 as infinite)
@@ -616,27 +616,12 @@ func (m *MIDs) Clear() {
 	m.index = make([]bool, int(midMax))
 }
 
-// netPipe simulates a network link using a real connection.
+// netPipe simulates a network link.
 // This is used over net.Pipe because net.Pipe is synchronous and this can create confusing results
 // because it does not work like a real network connection (a call to `Write` will block until the other
-// end calls `Read` whereas with a real connection there are buffers etc).
-// There are many ways to do this, but using a real connection is simple and effective!
+// end calls `Read` whereas with a real connection there are buffers etc.).
+// Previously a real local TCP connection was used, but that did not work with `synctest`.
 func netPipe(ctx context.Context) (net.Conn, net.Conn, error) {
-	var lc net.ListenConfig
-	l, err := lc.Listen(ctx, "tcp", "127.0.0.1:0") // Port 0 is wildcard port; OS will choose port for us
-	if err != nil {
-		return nil, nil, err
-	}
-	defer l.Close()
-	var d net.Dialer
-	userCon, err := d.DialContext(ctx, "tcp", l.Addr().String()) // Dial the port we just listened on
-	if err != nil {
-		return nil, nil, err
-	}
-	ourCon, err := l.Accept() // Should return immediately
-	if err != nil {
-		userCon.Close()
-		return nil, nil, err
-	}
-	return userCon, ourCon, nil
+	a, b := NewConnPair()
+	return a, b, nil
 }
