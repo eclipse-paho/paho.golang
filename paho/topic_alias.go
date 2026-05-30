@@ -10,6 +10,9 @@ import (
 // topic_alias handles aliases on received PUBLISH packets
 // It provides a `PublishReceived` function that will mutate the PUBLISH packet to resolve any aliases
 
+// Limitation - The alias cache should be reset before reconnecting. Currently, there is no mechanism to achieve
+// this, and I don't think it's a big issue (the broker should resend any aliases before using them).
+
 type topicAlias struct {
 	sync.Mutex
 	aliases map[uint16]string
