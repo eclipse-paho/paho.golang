@@ -18,7 +18,6 @@ package state
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 )
 
@@ -102,7 +101,6 @@ func (s *sendQuota) acquire(ctx context.Context, noWait bool) error {
 			// Acquired the semaphore after we were cancelled. Rather than trying to
 			// fix up the queue, just pretend we didn't notice the cancellation.
 			err = nil
-			fmt.Println("quota released entry but ready so nil error ", s.quota)
 		default:
 			// Remove ourselves from the list of waiters
 			for i, r := range s.waiters {
