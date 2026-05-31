@@ -18,9 +18,12 @@ package paho
 import (
 	"context"
 	"net"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/eclipse/paho.golang/internal/testserver"
 	"github.com/eclipse/paho.golang/packets"
 	paholog "github.com/eclipse/paho.golang/paho/log"
 	"github.com/stretchr/testify/assert"
@@ -29,254 +32,236 @@ import (
 )
 
 func TestDefaultPingerTimeout(t *testing.T) {
-	fakeServerConn, fakeClientConn := net.Pipe()
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		// Use buffered connection (so no need to resd/throw away data)
+		fakeServerConn, fakeClientConn := testserver.NewConnPair()
+		defer fakeServerConn.Close()
 
-	go func() {
-		// keep reading from fakeServerConn and throw away the data
-		buf := make([]byte, 1024)
-		for {
-			_, err := fakeServerConn.Read(buf)
-			if err != nil {
-				return
-			}
-		}
-	}()
-	defer fakeServerConn.Close()
+		pinger := NewDefaultPinger()
+		pinger.SetDebug(paholog.NewTestLogger(t, "DefaultPinger:"))
 
-	pinger := NewDefaultPinger()
-	pinger.SetDebug(paholog.NewTestLogger(t, "DefaultPinger:"))
+		// Allow pinger to run for 10 seconds (should exit after 1 because first ping sent immediately)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	pingResult := make(chan error, 1)
-	go func() {
-		pingResult <- pinger.Run(ctx, fakeClientConn, 1)
-	}()
+		startTime := time.Now()
+		pingErr := pinger.Run(ctx, fakeClientConn, 1)
+		duration := time.Since(startTime)
 
-	select {
-	case err := <-pingResult:
-		require.NotNil(t, err)
-		assert.EqualError(t, err, "PINGRESP timed out")
-	case <-time.After(10 * time.Second):
-		t.Error("expected DefaultPinger to detect timeout and return error")
-	}
+		require.GreaterOrEqual(t, duration.Seconds(), 1.0, "Expected pinger to run for at least 1 second")
+		assert.EqualError(t, pingErr, "PINGRESP timed out")
+	})
 }
 
 func TestDefaultPingerSuccess(t *testing.T) {
-	fakeClientConn, fakeServerConn := net.Pipe()
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		// Everything will shut down after 10 seconds, after which results will be checked
+		var wg sync.WaitGroup
+		startTime := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	pinger := NewDefaultPinger()
-	pinger.SetDebug(paholog.NewTestLogger(t, "DefaultPinger:"))
+		fakeClientConn, fakeServerConn := testserver.NewConnPair()
+		context.AfterFunc(ctx, func() {
+			fakeServerConn.Close()
+		})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	pingResult := make(chan error, 1)
-	go func() {
-		pingResult <- pinger.Run(ctx, fakeClientConn, 3)
-	}()
+		pinger := NewDefaultPinger()
+		pinger.SetDebug(paholog.NewTestLogger(t, "DefaultPinger:"))
 
-	go func() {
-		// keep reading from fakeServerConn and call PingResp() when a PINGREQ is received
-		for {
-			recv, err := packets.ReadPacket(fakeServerConn)
-			if err != nil {
-				return
+		var pingErr error
+		var duration time.Duration
+		wg.Go(func() {
+			pingErr = pinger.Run(ctx, fakeClientConn, 3)
+			duration = time.Since(startTime)
+			fakeServerConn.Close() // Allow goroutine handling comms to close
+		})
+
+		wg.Go(func() {
+			// keep reading from fakeServerConn and call PingResp() when a PINGREQ is received
+			for {
+				recv, err := packets.ReadPacket(fakeServerConn)
+				if err != nil {
+					return
+				}
+				if recv.Type == packets.PINGREQ {
+					pinger.PingResp()
+				}
 			}
-			if recv.Type == packets.PINGREQ {
-				pinger.PingResp()
-			}
-		}
-	}()
-	defer fakeServerConn.Close()
+		})
 
-	select {
-	case err := <-pingResult:
-		t.Errorf("expected DefaultPinger to not return error, got %v", err)
-	case <-time.After(10 * time.Second):
-		// PASS
-	}
+		wg.Wait()
+		require.GreaterOrEqual(t, duration.Seconds(), 10.0, "Expected pinger to run for at least 10 seconds")
+		require.NoError(t, pingErr)
+	})
 }
 
 func TestDefaultPingerPacketSentReceived(t *testing.T) {
-	fakeClientConn, fakeServerConn := net.Pipe()
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		// Everything will shut down after 10 seconds, after which results will be checked
+		var wg sync.WaitGroup
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		fakeClientConn, fakeServerConn := testserver.NewConnPair()
+		context.AfterFunc(ctx, func() {
+			fakeServerConn.Close()
+		})
 
-	pinger := NewDefaultPinger()
-	pinger.SetDebug(paholog.NewTestLogger(t, "DefaultPinger:"))
+		pinger := NewDefaultPinger()
+		pinger.SetDebug(paholog.NewTestLogger(t, "DefaultPinger:"))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	pingResult := make(chan error, 1)
-	go func() {
-		pingResult <- pinger.Run(ctx, fakeClientConn, 3)
-	}()
+		var pingErr error
+		wg.Go(func() {
+			pingErr = pinger.Run(ctx, fakeClientConn, 3) // 3-second keepalive
+		})
 
-	// keep calling PacketSent() (and PacketReceived) in a goroutine to check that the Pinger avoids sending PINGREQs when not needed
-	stop := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
+		// keep calling PacketSent() (and PacketReceived) in a goroutine to check that the Pinger avoids sending PINGREQs when not needed
+		wg.Go(func() {
+			for ctx.Err() == nil {
+				time.Sleep(time.Second) // Ensure initial ping is sent (and avoid tight loop)
+				// Notify pinger that packets have been sent/received (so it should not ping)
+				pinger.PacketSent()
+				pinger.PacketReceived()
+
 			}
-			// keep calling PacketSent() and PacketReceived
-			pinger.PacketSent()
-			pinger.PacketReceived()
-		}
-	}()
-	defer close(stop)
+		})
 
-	// keep reading from fakeServerConn and call PingResp() when a PINGREQ is received
-	// if more than one PINGREQ is received, the test will fail
-	count := 0
-	tooManyPingreqs := make(chan struct{})
-	go func() {
-		for {
+		// read from fakeServerConn and call PingResp() when a PINGREQ is received
+		pingCount := 0
+		var readPacketErr error
+		wg.Go(func() {
 			recv, err := packets.ReadPacket(fakeServerConn)
 			if err != nil {
+				readPacketErr = err
 				return
 			}
 			if recv.Type == packets.PINGREQ {
-				count++
+				pingCount++
 				pinger.PingResp()
-				if count == 2 { // we allow the count to be 1 because the first PINGREQ is sent immediately
-					close(tooManyPingreqs)
-				}
 			}
-		}
-	}()
-	defer fakeServerConn.Close()
+		})
 
-	select {
-	case <-tooManyPingreqs:
-		t.Error("expected DefaultPinger to not send PINGREQs when not needed")
-	case err := <-pingResult:
-		t.Errorf("expected DefaultPinger to not return error, got %v", err)
-	case <-time.After(10 * time.Second):
-		// PASS
-	}
+		// Wait for everything to finnish (10 seconds) and then check result
+		wg.Wait()
+		require.Equal(t, 1, pingCount, "Expected 1 ping") // Initial ping is sent immediately
+		require.NoError(t, pingErr)
+		require.NoError(t, readPacketErr) // terminates after processing packet
+	})
 }
 
 // TestDefaultPingerPacketSentOnly - If packets are being sent, but nothing received, then a pingreq should be sent
 func TestDefaultPingerPacketSentOnly(t *testing.T) {
-	fakeClientConn, fakeServerConn := net.Pipe()
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var wg sync.WaitGroup
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) // Test runs for 10 seconds
+		defer cancel()
 
-	pinger := NewDefaultPinger()
-	pinger.SetDebug(paholog.NewTestLogger(t, "DefaultPinger:"))
+		fakeClientConn, fakeServerConn := testserver.NewConnPair()
+		context.AfterFunc(ctx, func() {
+			fakeServerConn.Close()
+		})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	pingResult := make(chan error, 1)
-	go func() {
-		pingResult <- pinger.Run(ctx, fakeClientConn, 3)
-	}()
+		pinger := NewDefaultPinger()
+		pinger.SetDebug(paholog.NewTestLogger(t, "DefaultPinger:"))
 
-	// keep calling PacketSent() (and PacketReceived) in a goroutine to check that the Pinger avoids sending PINGREQs when not needed
-	stop := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
+		var pingErr error
+		wg.Go(func() {
+			pingErr = pinger.Run(ctx, fakeClientConn, 3)
+		})
+
+		// keep calling PacketSent() in a goroutine to check that the Pinger avoids sending PINGREQs when not needed
+		wg.Go(func() {
+			for ctx.Err() == nil {
+				pinger.PacketSent()
+				time.Sleep(time.Millisecond)
 			}
-			// keep calling PacketSent()
-			pinger.PacketSent()
-		}
-	}()
-	defer close(stop)
+		})
 
-	// keep reading from fakeServerConn and call PingResp() when a PINGREQ is received
-	// if more than one PINGREQ is received, the test will fail
-	count := 0
-	twoPingreqs := make(chan struct{})
-	go func() {
-		for {
-			recv, err := packets.ReadPacket(fakeServerConn)
-			if err != nil {
-				return
-			}
-			if recv.Type == packets.PINGREQ {
-				count++
-				pinger.PingResp()
-				if count == 2 {
-					close(twoPingreqs)
+		// keep reading from fakeServerConn and call PingResp() when a PINGREQ is received
+		// if more than one PINGREQ is received, the test will fail
+		pingCount := 0
+		var readPacketErr error
+		wg.Go(func() {
+			for {
+				recv, err := packets.ReadPacket(fakeServerConn)
+				if err != nil {
+					readPacketErr = err
+					return
+				}
+				if recv.Type == packets.PINGREQ {
+					pingCount++
+					pinger.PingResp()
 				}
 			}
-		}
-	}()
-	defer fakeServerConn.Close()
+		})
 
-	select {
-	case <-twoPingreqs:
-		// pass
-	case err := <-pingResult:
-		t.Errorf("expected DefaultPinger to not return error, got %v", err)
-	case <-time.After(10 * time.Second):
-		t.Error("expected DefaultPinger to send PINGREQs when no packets received")
-	}
+		wg.Wait()                                          // wait for test to run
+		require.Equal(t, 4, pingCount, "Expected 4 pings") // 0,3,6,9 seconds
+		require.NoError(t, pingErr)
+		require.ErrorIs(t, readPacketErr, net.ErrClosed)
+	})
 }
 
 // TestDefaultPingerPacketReceiveOnly - If packets are being received, but nothing sent, then a pingreq should be sent
 func TestDefaultPingerPacketReceiveOnly(t *testing.T) {
-	fakeClientConn, fakeServerConn := net.Pipe()
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var wg sync.WaitGroup
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) // Test runs for 10 seconds
+		defer cancel()
 
-	pinger := NewDefaultPinger()
-	pinger.SetDebug(paholog.NewTestLogger(t, "DefaultPinger:"))
+		fakeClientConn, fakeServerConn := testserver.NewConnPair()
+		context.AfterFunc(ctx, func() {
+			fakeServerConn.Close()
+		})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	pingResult := make(chan error, 1)
-	go func() {
-		pingResult <- pinger.Run(ctx, fakeClientConn, 3)
-	}()
+		pinger := NewDefaultPinger()
+		pinger.SetDebug(paholog.NewTestLogger(t, "DefaultPinger:"))
 
-	// keep calling PacketSent() (and PacketReceived) in a goroutine to check that the Pinger avoids sending PINGREQs when not needed
-	stop := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
+		var pingErr error
+		wg.Go(func() {
+			pingErr = pinger.Run(ctx, fakeClientConn, 3)
+		})
+
+		// keep calling PacketSent() in a goroutine to check that the Pinger avoids sending PINGREQs when not needed
+		wg.Go(func() {
+			for ctx.Err() == nil {
+				pinger.PacketReceived()
+				time.Sleep(time.Millisecond)
 			}
-			pinger.PacketReceived()
-		}
-	}()
-	defer close(stop)
+		})
 
-	// keep reading from fakeServerConn and call PingResp() when a PINGREQ is received
-	// if more than one PINGREQ is received, the test will fail
-	count := 0
-	twoPingreqs := make(chan struct{})
-	go func() {
-		for {
-			recv, err := packets.ReadPacket(fakeServerConn)
-			if err != nil {
-				return
-			}
-			if recv.Type == packets.PINGREQ {
-				count++
-				pinger.PingResp()
-				if count == 2 {
-					close(twoPingreqs)
+		// keep reading from fakeServerConn and call PingResp() when a PINGREQ is received
+		// if more than one PINGREQ is received, the test will fail
+		pingCount := 0
+		var readPacketErr error
+		wg.Go(func() {
+			for {
+				recv, err := packets.ReadPacket(fakeServerConn)
+				if err != nil {
+					readPacketErr = err
+					return
+				}
+				if recv.Type == packets.PINGREQ {
+					pingCount++
+					pinger.PingResp()
 				}
 			}
-		}
-	}()
-	defer fakeServerConn.Close()
+		})
 
-	select {
-	case <-twoPingreqs:
-		// pass
-	case err := <-pingResult:
-		t.Errorf("expected DefaultPinger to not return error, got %v", err)
-	case <-time.After(10 * time.Second):
-		t.Error("expected DefaultPinger to send PINGREQs when no packets sent")
-	}
+		wg.Wait()                                          // wait for test to run
+		require.Equal(t, 4, pingCount, "Expected 4 pings") // 0,3,6,9 seconds
+		require.NoError(t, pingErr)
+		require.ErrorIs(t, readPacketErr, net.ErrClosed)
+	})
 }
 
 func TestDefaultPingerStartStop(t *testing.T) {
+	t.Parallel()
 	fakeServerConn, fakeClientConn := net.Pipe()
 
 	go func() {
