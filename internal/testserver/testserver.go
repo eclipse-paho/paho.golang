@@ -112,7 +112,7 @@ type Instance struct {
 	packetReceived  func(publish *packets.ControlPacket) error      // Will be called when a packet is received (return error to drop connection)
 	overrideConnAck func(cp *packets.Connect, cap *packets.Connack) // Will be called before CONNECT response transmitted, cap can be modified
 
-	// Below are not thread-safe (should only be accessed after checking connected)
+	// Variables below are not thread-safe (should only be accessed after checking connected)
 	connPktDone           bool                    // true if we have processed a CONNECT packet (ever!)
 	sessionPresent        bool                    // true if a session exists
 	sessionExpiryInterval uint32                  // as set on the most recent `connect` (we treat anything >0 as infinite)
@@ -158,19 +158,20 @@ func (i *Instance) Connected() bool {
 // Returns a net.Conn (to pass to paho), a channel that will be closed when connection has shutdown and
 // an error (if any).
 func (i *Instance) Connect(ctx context.Context) (net.Conn, chan struct{}, error) {
+	if err := ctx.Err(); err != nil { // Fail fast
+		return nil, nil, err
+	}
+
 	if !i.connected.CompareAndSwap(false, true) {
 		return nil, nil, errors.New("already connected") // We only support a single connection
 	}
 	i.connPktDone = false // Connection packet should be the first thing we receive after each connection
 
-	userCon, ourCon, err := netPipe(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
+	c1, c2 := NewConnPair()
 
 	// Ensure both connections support thread safe writes
-	userCon = packets.NewThreadSafeConn(userCon)
-	ourCon = packets.NewThreadSafeConn(ourCon) // Should not be necessary but may avoid hard to spot bugs
+	userCon := packets.NewThreadSafeConn(c1)
+	ourCon := packets.NewThreadSafeConn(c2) // Should not be necessary but may avoid hard to spot bugs
 
 	done := make(chan struct{})
 	go func() {
@@ -614,29 +615,4 @@ func (m *MIDs) Free(i uint16) {
 // Note: Does not reset lastMid because retaining a sequence can make debugging easier
 func (m *MIDs) Clear() {
 	m.index = make([]bool, int(midMax))
-}
-
-// netPipe simulates a network link using a real connection.
-// This is used over net.Pipe because net.Pipe is synchronous and this can create confusing results
-// because it does not work like a real network connection (a call to `Write` will block until the other
-// end calls `Read` whereas with a real connection there are buffers etc).
-// There are many ways to do this, but using a real connection is simple and effective!
-func netPipe(ctx context.Context) (net.Conn, net.Conn, error) {
-	var lc net.ListenConfig
-	l, err := lc.Listen(ctx, "tcp", "127.0.0.1:0") // Port 0 is wildcard port; OS will choose port for us
-	if err != nil {
-		return nil, nil, err
-	}
-	defer l.Close()
-	var d net.Dialer
-	userCon, err := d.DialContext(ctx, "tcp", l.Addr().String()) // Dial the port we just listened on
-	if err != nil {
-		return nil, nil, err
-	}
-	ourCon, err := l.Accept() // Should return immediately
-	if err != nil {
-		userCon.Close()
-		return nil, nil, err
-	}
-	return userCon, ourCon, nil
 }

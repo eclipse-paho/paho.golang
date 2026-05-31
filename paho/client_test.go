@@ -123,7 +123,7 @@ func TestClientSubscribe(t *testing.T) {
 	defer c.close()
 	c.SetDebugLogger(clientLogger)
 
-	clientCtx := basicClientInitialisation(c)
+	clientCtx := basicClientInitialisation(t.Context(), c)
 	c.publishPackets = make(chan *packets.Publish)
 	c.workers.Add(2)
 	go func() {
@@ -168,7 +168,7 @@ func TestClientUnsubscribe(t *testing.T) {
 	defer c.close()
 	c.SetDebugLogger(clientLogger)
 
-	clientCtx := basicClientInitialisation(c)
+	clientCtx := basicClientInitialisation(t.Context(), c)
 	c.publishPackets = make(chan *packets.Publish)
 	c.workers.Add(2)
 	go func() {
@@ -206,7 +206,7 @@ func TestClientPublishQoS0(t *testing.T) {
 	defer c.close()
 	c.SetDebugLogger(clientLogger)
 
-	clientCtx := basicClientInitialisation(c)
+	clientCtx := basicClientInitialisation(t.Context(), c)
 	c.publishPackets = make(chan *packets.Publish)
 	c.workers.Add(2)
 	go func() {
@@ -249,7 +249,7 @@ func TestClientPublishQoS1(t *testing.T) {
 	defer c.close()
 	c.SetDebugLogger(clientLogger)
 
-	clientCtx := basicClientInitialisation(c)
+	clientCtx := basicClientInitialisation(t.Context(), c)
 	c.publishPackets = make(chan *packets.Publish)
 	c.workers.Add(2)
 	go func() {
@@ -294,7 +294,7 @@ func TestClientPublishQoS2(t *testing.T) {
 	defer c.close()
 	c.SetDebugLogger(clientLogger)
 
-	clientCtx := basicClientInitialisation(c)
+	clientCtx := basicClientInitialisation(t.Context(), c)
 	c.publishPackets = make(chan *packets.Publish)
 	c.workers.Add(2)
 	go func() {
@@ -341,7 +341,7 @@ func TestClientReceiveQoS0(t *testing.T) {
 	defer c.close()
 	c.SetDebugLogger(clientLogger)
 
-	clientCtx := basicClientInitialisation(c)
+	clientCtx := basicClientInitialisation(t.Context(), c)
 	c.publishPackets = make(chan *packets.Publish)
 	c.workers.Add(2)
 	go func() {
@@ -388,7 +388,7 @@ func TestClientReceiveQoS1(t *testing.T) {
 	defer c.close()
 	c.SetDebugLogger(clientLogger)
 
-	clientCtx := basicClientInitialisation(c)
+	clientCtx := basicClientInitialisation(t.Context(), c)
 	c.publishPackets = make(chan *packets.Publish)
 	c.workers.Add(2)
 	go func() {
@@ -436,7 +436,7 @@ func TestClientReceiveQoS2(t *testing.T) {
 	defer c.close()
 	c.SetDebugLogger(clientLogger)
 
-	clientCtx := basicClientInitialisation(c)
+	clientCtx := basicClientInitialisation(t.Context(), c)
 	c.publishPackets = make(chan *packets.Publish)
 	c.workers.Add(2)
 	go func() {
@@ -653,7 +653,7 @@ func TestReceiveServerDisconnect(t *testing.T) {
 	defer c.close()
 	c.SetDebugLogger(clientLogger)
 
-	clientCtx := basicClientInitialisation(c)
+	clientCtx := basicClientInitialisation(t.Context(), c)
 	c.publishPackets = make(chan *packets.Publish)
 	c.workers.Add(2)
 	go func() {
@@ -693,7 +693,7 @@ func TestReceiveServerDisconnectNoProps(t *testing.T) {
 	defer c.close()
 	c.SetDebugLogger(clientLogger)
 
-	clientCtx := basicClientInitialisation(c)
+	clientCtx := basicClientInitialisation(t.Context(), c)
 	c.publishPackets = make(chan *packets.Publish)
 	c.workers.Add(1)
 	go func() {
@@ -747,7 +747,7 @@ func testAuthenticate(t *testing.T, wantSucces bool, response packets.Packet) {
 	defer c.close()
 	c.SetDebugLogger(clientLogger)
 
-	clientCtx := basicClientInitialisation(c)
+	clientCtx := basicClientInitialisation(t.Context(), c)
 	c.publishPackets = make(chan *packets.Publish)
 	c.workers.Add(2)
 	go func() {
@@ -867,20 +867,19 @@ func TestAuthenticateOnConnect(t *testing.T) {
 func TestCleanup(t *testing.T) {
 	serverLogger := paholog.NewTestLogger(t, "TestServer:")
 	ts := basictestserver.New(serverLogger)
-	go ts.Run()
+	var wg sync.WaitGroup
+	wg.Go(ts.Run)
 
 	c := NewClient(ClientConfig{
 		Conn: ts.ClientConn(),
 	})
 	require.NotNil(t, c)
-	basicClientInitialisation(c)
-
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // cancelling to make the client fail on the connection attempt
 	ca, err := c.Connect(ctx, &Connect{
 		ClientID: "testClient",
 	})
-	require.True(t, errors.Is(err, context.Canceled))
+	require.ErrorIs(t, err, context.Canceled)
 	require.Nil(t, ca)
 
 	// client should have shutdown cleanly (and waited before returning)
@@ -893,6 +892,8 @@ func TestCleanup(t *testing.T) {
 
 	// verify that it's possible to try again
 	ts.Stop()
+	wg.Wait()
+	wg = sync.WaitGroup{}
 	ts = basictestserver.New(serverLogger)
 	ts.SetResponse(packets.CONNACK, &packets.Connack{
 		ReasonCode:     0,
@@ -904,8 +905,7 @@ func TestCleanup(t *testing.T) {
 			TopicAliasMaximum: Uint16(200),
 		},
 	})
-	go ts.Run()
-	defer ts.Stop()
+	wg.Go(ts.Run)
 
 	ctx = context.Background()
 	c = NewClient(ClientConfig{
@@ -922,6 +922,9 @@ func TestCleanup(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, uint8(0), ca.ReasonCode)
+
+	ts.Stop()
+	wg.Wait()
 }
 
 func TestDisconnect(t *testing.T) {
@@ -944,7 +947,6 @@ func TestDisconnect(t *testing.T) {
 		Conn: ts.ClientConn(),
 	})
 	require.NotNil(t, c)
-	basicClientInitialisation(c)
 	c.SetDebugLogger(clientLogger)
 	defer c.close()
 
@@ -1163,8 +1165,9 @@ func TestAddOnPublishReceived(t *testing.T) {
 
 // basicClientInitialisation initialises a Client that will be used without calling Connect
 // performs the least configuration possible such that calling `close()` will cleanly shutdown
-func basicClientInitialisation(c *Client) context.Context {
-	ctx, cancelFunc := context.WithCancel(context.Background())
+// Should only be used if `client.Connect()` will not be called.
+func basicClientInitialisation(ctx context.Context, c *Client) context.Context {
+	ctx, cancelFunc := context.WithCancel(ctx)
 	c.cancelFunc = cancelFunc
 	done := make(chan struct{})
 	c.done = done

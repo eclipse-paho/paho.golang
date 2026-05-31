@@ -17,6 +17,7 @@ package paho
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,7 +31,13 @@ import (
 // TestPackedIdNoExhaustion tests interactions between Publish and the session ensuring that IDs are
 // released and reused
 func TestPackedIdNoExhaustion(t *testing.T) {
-	ts := basictestserver.New(paholog.NewTestLogger(t, "TestServer:"))
+	t.Parallel()
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute) // Should finnish in a few seconds, but does a lot of work
+	defer cancel()
+
+	// Logging doubles test runtime - If issues are encountered, use `paholog.NewTestLogger(t, "TestServer:")`
+	ts := basictestserver.New(paholog.NOOPLogger{})
 	ts.SetResponse(packets.PUBACK, &packets.Puback{
 		ReasonCode: packets.PubackSuccess,
 		Properties: &packets.Properties{},
@@ -43,10 +50,10 @@ func TestPackedIdNoExhaustion(t *testing.T) {
 	})
 	require.NotNil(t, c)
 
-	clientCtx := basicClientInitialisation(c)
+	clientCtx := basicClientInitialisation(ctx, c)
 	c.publishPackets = make(chan *packets.Publish)
-	go c.incoming(clientCtx)
-	go c.config.PingHandler.Run(clientCtx, c.config.Conn, 30)
+	wg.Go(func() { c.incoming(clientCtx) })
+	wg.Go(func() { c.config.PingHandler.Run(clientCtx, c.config.Conn, 30) })
 	c.config.Session.ConAckReceived(c.config.Conn, &packets.Connect{}, &packets.Connack{})
 
 	for i := 0; i < 70000; i++ {
@@ -61,9 +68,11 @@ func TestPackedIdNoExhaustion(t *testing.T) {
 		assert.Equal(t, uint8(0), pa.ReasonCode)
 	}
 
-	time.Sleep(10 * time.Millisecond)
+	// Ensure things shutdown
+	cancel()
+	wg.Wait()
 }
 
 // Note: We no longer test for Packet Id Exhaustion because the way the CONNACK Receive Maximum now works makes
-// this impossible (the semaphore will lock on the 65536th request and only unlock when a response is received
+// this impossible (the semaphore will lock on the 65536th request and only unlock when a response is received,
 // which would also mean an ID is available).
