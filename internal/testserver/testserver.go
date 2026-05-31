@@ -158,19 +158,20 @@ func (i *Instance) Connected() bool {
 // Returns a net.Conn (to pass to paho), a channel that will be closed when connection has shutdown and
 // an error (if any).
 func (i *Instance) Connect(ctx context.Context) (net.Conn, chan struct{}, error) {
+	if err := ctx.Err(); err != nil { // Fail fast
+		return nil, nil, err
+	}
+
 	if !i.connected.CompareAndSwap(false, true) {
 		return nil, nil, errors.New("already connected") // We only support a single connection
 	}
 	i.connPktDone = false // Connection packet should be the first thing we receive after each connection
 
-	userCon, ourCon, err := netPipe(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
+	c1, c2 := NewConnPair()
 
 	// Ensure both connections support thread safe writes
-	userCon = packets.NewThreadSafeConn(userCon)
-	ourCon = packets.NewThreadSafeConn(ourCon) // Should not be necessary but may avoid hard to spot bugs
+	userCon := packets.NewThreadSafeConn(c1)
+	ourCon := packets.NewThreadSafeConn(c2) // Should not be necessary but may avoid hard to spot bugs
 
 	done := make(chan struct{})
 	go func() {
@@ -614,14 +615,4 @@ func (m *MIDs) Free(i uint16) {
 // Note: Does not reset lastMid because retaining a sequence can make debugging easier
 func (m *MIDs) Clear() {
 	m.index = make([]bool, int(midMax))
-}
-
-// netPipe simulates a network link.
-// This is used over net.Pipe because net.Pipe is synchronous and this can create confusing results
-// because it does not work like a real network connection (a call to `Write` will block until the other
-// end calls `Read` whereas with a real connection there are buffers etc.).
-// Previously a real local TCP connection was used, but that did not work with `synctest`.
-func netPipe(ctx context.Context) (net.Conn, net.Conn, error) {
-	a, b := NewConnPair()
-	return a, b, nil
 }

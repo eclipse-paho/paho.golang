@@ -947,7 +947,6 @@ func TestDisconnect(t *testing.T) {
 		Conn: ts.ClientConn(),
 	})
 	require.NotNil(t, c)
-	basicClientInitialisation(t.Context(), c)
 	c.SetDebugLogger(clientLogger)
 	defer c.close()
 
@@ -1166,6 +1165,7 @@ func TestAddOnPublishReceived(t *testing.T) {
 
 // basicClientInitialisation initialises a Client that will be used without calling Connect
 // performs the least configuration possible such that calling `close()` will cleanly shutdown
+// Should only be used if `client.Connect()` will not be called.
 func basicClientInitialisation(ctx context.Context, c *Client) context.Context {
 	ctx, cancelFunc := context.WithCancel(ctx)
 	c.cancelFunc = cancelFunc
