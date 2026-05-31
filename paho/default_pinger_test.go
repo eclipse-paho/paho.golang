@@ -125,7 +125,6 @@ func TestDefaultPingerPacketSentReceived(t *testing.T) {
 				// Notify pinger that packets have been sent/received (so it should not ping)
 				pinger.PacketSent()
 				pinger.PacketReceived()
-
 			}
 		})
 
@@ -133,14 +132,16 @@ func TestDefaultPingerPacketSentReceived(t *testing.T) {
 		pingCount := 0
 		var readPacketErr error
 		wg.Go(func() {
-			recv, err := packets.ReadPacket(fakeServerConn)
-			if err != nil {
-				readPacketErr = err
-				return
-			}
-			if recv.Type == packets.PINGREQ {
-				pingCount++
-				pinger.PingResp()
+			for {
+				recv, err := packets.ReadPacket(fakeServerConn)
+				if err != nil {
+					readPacketErr = err
+					return
+				}
+				if recv.Type == packets.PINGREQ {
+					pingCount++
+					pinger.PingResp()
+				}
 			}
 		})
 
@@ -148,7 +149,7 @@ func TestDefaultPingerPacketSentReceived(t *testing.T) {
 		wg.Wait()
 		require.Equal(t, 1, pingCount, "Expected 1 ping") // Initial ping is sent immediately
 		require.NoError(t, pingErr)
-		require.NoError(t, readPacketErr) // terminates after processing packet
+		require.ErrorIs(t, readPacketErr, net.ErrClosed)
 	})
 }
 
