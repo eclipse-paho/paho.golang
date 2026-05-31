@@ -125,5 +125,4 @@ func Test_routeDefault(t *testing.T) {
 	if r1Count != 2 || r2Count != 1 {
 		t.Errorf("no router should have been called r1: %d, r2: %d", r1Count, r2Count)
 	}
-
 }
