@@ -489,7 +489,7 @@ func (c *Client) incoming(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			recv, err := packets.ReadPacket(c.config.Conn)
+			recv, err := packets.ReadPacketN(c.config.Conn, c.serverProps.MaximumPacketSize)
 			if err != nil {
 				go c.error(err)
 				return

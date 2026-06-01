@@ -241,8 +241,16 @@ func NewControlPacket(t byte) *ControlPacket {
 }
 
 // ReadPacket reads a control packet from a io.Reader and returns a completed
-// struct with the appropriate data
+// struct with the appropriate data.
 func ReadPacket(r io.Reader) (*ControlPacket, error) {
+	return ReadPacketN(r, 0)
+}
+
+// ReadPacketN reads a control packet from an io.Reader and returns a completed
+// struct with the appropriate data. If maxSize is greater than zero, packets
+// exceeding that size are rejected before the payload is allocated (as per
+// MQTT v5.0 spec section 3.2.2.3.10).
+func ReadPacketN(r io.Reader, maxSize uint32) (*ControlPacket, error) {
 	t := [1]byte{}
 	_, err := io.ReadFull(r, t[:])
 	if err != nil {
@@ -308,9 +316,19 @@ func ReadPacket(r io.Reader) (*ControlPacket, error) {
 	if err != nil {
 		return nil, err
 	}
+	vbiLen := vbi.Len()
 	cp.remainingLength, err = decodeVBI(vbi)
 	if err != nil {
 		return nil, err
+	}
+
+	// Check maximum packet size before allocating the payload buffer.
+	// Total packet size = 1 (type/flags byte) + VBI length + remaining length.
+	if maxSize > 0 {
+		packetSize := uint32(1+vbiLen) + uint32(cp.remainingLength)
+		if packetSize > maxSize {
+			return nil, fmt.Errorf("packet size %d exceeds maximum allowed %d", packetSize, maxSize)
+		}
 	}
 
 	b := make([]byte, cp.remainingLength)

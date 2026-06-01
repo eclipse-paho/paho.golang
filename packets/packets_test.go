@@ -181,6 +181,32 @@ func TestReadPacketConnect(t *testing.T) {
 	assert.Equal(t, uint32(30), *c.Content.(*Connect).Properties.SessionExpiryInterval)
 }
 
+func TestReadPacketNMaxSize(t *testing.T) {
+	// Build a CONNECT packet (40 bytes total)
+	p := []byte{16, 38, 0, 4, 77, 81, 84, 84, 5, 128, 0, 30, 5, 17, 0, 0, 0, 30, 0, 10, 116, 101, 115, 116, 67, 108, 105, 101, 110, 116, 0, 8, 116, 101, 115, 116, 85, 115, 101, 114}
+	require.Equal(t, 40, len(p))
+
+	// maxSize=0 means no limit — should succeed
+	c, err := ReadPacketN(bytes.NewReader(p), 0)
+	require.NoError(t, err)
+	assert.Equal(t, "testClient", c.Content.(*Connect).ClientID)
+
+	// maxSize larger than packet — should succeed
+	c, err = ReadPacketN(bytes.NewReader(p), 100)
+	require.NoError(t, err)
+	assert.Equal(t, "testClient", c.Content.(*Connect).ClientID)
+
+	// maxSize equal to packet — should succeed
+	c, err = ReadPacketN(bytes.NewReader(p), 40)
+	require.NoError(t, err)
+	assert.Equal(t, "testClient", c.Content.(*Connect).ClientID)
+
+	// maxSize smaller than packet — should reject before allocating payload
+	_, err = ReadPacketN(bytes.NewReader(p), 39)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum allowed")
+}
+
 func TestReadStringWriteString(t *testing.T) {
 	var b bytes.Buffer
 	const test1 = "Test string 世界" // include unicode
