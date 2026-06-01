@@ -181,6 +181,54 @@ func TestReadPacketConnect(t *testing.T) {
 	assert.Equal(t, uint32(30), *c.Content.(*Connect).Properties.SessionExpiryInterval)
 }
 
+func TestReadPacketNConnect(t *testing.T) {
+	// Same packet as TestReadPacketConnect
+	p := []byte{16, 38, 0, 4, 77, 81, 84, 84, 5, 128, 0, 30, 5, 17, 0, 0, 0, 30, 0, 10, 116, 101, 115, 116, 67, 108, 105, 101, 110, 116, 0, 8, 116, 101, 115, 116, 85, 115, 101, 114}
+
+	// With maxSize=0 (no limit) should behave like ReadPacket
+	c, err := ReadPacketN(bufio.NewReader(bytes.NewReader(p)), 0)
+	require.Nil(t, err)
+	assert.Equal(t, uint16(30), c.Content.(*Connect).KeepAlive)
+	assert.Equal(t, "testClient", c.Content.(*Connect).ClientID)
+
+	// With a large enough maxSize should succeed
+	c, err = ReadPacketN(bufio.NewReader(bytes.NewReader(p)), 1024)
+	require.Nil(t, err)
+	assert.Equal(t, "testClient", c.Content.(*Connect).ClientID)
+
+	// With a maxSize smaller than the packet should fail
+	_, err = ReadPacketN(bufio.NewReader(bytes.NewReader(p)), 10)
+	require.NotNil(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum allowed")
+	assert.Contains(t, err.Error(), "Packet too large")
+}
+
+func TestReadPacketNPingreq(t *testing.T) {
+	// PINGREQ is the simplest packet: type 0xC0, remaining length 0 (2 bytes total)
+	p := []byte{0xC0, 0x00}
+
+	// Should succeed with maxSize=0 (no limit)
+	c, err := ReadPacketN(bufio.NewReader(bytes.NewReader(p)), 0)
+	require.Nil(t, err)
+	assert.Equal(t, byte(PINGREQ), c.Type)
+
+	// Should succeed with enough room
+	c, err = ReadPacketN(bufio.NewReader(bytes.NewReader(p)), 100)
+	require.Nil(t, err)
+	assert.Equal(t, byte(PINGREQ), c.Type)
+
+	// Should succeed at exact boundary (2 bytes)
+	c, err = ReadPacketN(bufio.NewReader(bytes.NewReader(p)), 2)
+	require.Nil(t, err)
+	assert.Equal(t, byte(PINGREQ), c.Type)
+
+	// Should fail with maxSize=1 (packet is 2 bytes total)
+	_, err = ReadPacketN(bufio.NewReader(bytes.NewReader(p)), 1)
+	require.NotNil(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum allowed")
+	assert.Contains(t, err.Error(), "Packet too large")
+}
+
 func TestReadStringWriteString(t *testing.T) {
 	var b bytes.Buffer
 	const test1 = "Test string 世界" // include unicode
