@@ -241,17 +241,24 @@ func NewControlPacket(t byte) *ControlPacket {
 }
 
 // ReadPacket reads a control packet from a io.Reader and returns a completed
-// struct with the appropriate data
+// struct with the appropriate data.
 func ReadPacket(r io.Reader) (*ControlPacket, error) {
+	return ReadPacketN(r, 0)
+}
+
+// ReadPacketN reads a control packet from an io.Reader and returns a completed
+// struct with the appropriate data. If maxSize is greater than zero and the
+// total packet size (fixed header + variable header + payload) exceeds maxSize,
+// the packet is rejected with an error. This protects against a malicious broker
+// sending oversized packets that could cause the client to run out of memory.
+// As per MQTT v5.0 spec section 4.13, a client should DISCONNECT with Reason
+// Code 0x95 (Packet too large) upon receiving an oversize packet.
+func ReadPacketN(r io.Reader, maxSize int) (*ControlPacket, error) {
 	t := [1]byte{}
 	_, err := io.ReadFull(r, t[:])
 	if err != nil {
 		return nil, err
 	}
-	// cp := NewControlPacket(PacketType(t[0] >> 4))
-	// if cp == nil {
-	// 	return nil, fmt.Errorf("invalid packet type requested, %d", t[0]>>4)
-	// }
 
 	pt := t[0] >> 4
 	cp := &ControlPacket{FixedHeader: FixedHeader{Type: pt}}
@@ -308,9 +315,19 @@ func ReadPacket(r io.Reader) (*ControlPacket, error) {
 	if err != nil {
 		return nil, err
 	}
+	vbiLen := vbi.Len()
 	cp.remainingLength, err = decodeVBI(vbi)
 	if err != nil {
 		return nil, err
+	}
+
+	// Check packet size against maximum before allocating the payload buffer.
+	// Total packet size = 1 (fixed header byte) + VBI length + remaining length.
+	if maxSize > 0 {
+		packetSize := 1 + vbiLen + cp.remainingLength
+		if packetSize > maxSize {
+			return nil, fmt.Errorf("packet size %d exceeds maximum allowed %d (MQTT 5.0 Reason Code 0x95: Packet too large)", packetSize, maxSize)
+		}
 	}
 
 	b := make([]byte, cp.remainingLength)
