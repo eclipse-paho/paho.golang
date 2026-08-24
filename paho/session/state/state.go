@@ -361,6 +361,12 @@ func (s *State) AddToSession(ctx context.Context, packet session.Packet, resp ch
 	}
 	// If the connection is lost whilst we are waiting, then in Acquire should terminate.
 	connCtx := s.connCtx
+	// The send quota belongs to the connection identified by connCtx above, and is
+	// replaced by ConAckReceived when a new connection is established. Take a
+	// reference to it here, under the mutex, rather than reading s.inflight later:
+	// Acquire may block, so it cannot be called while holding the mutex, and reading
+	// the field after unlocking races a reconnect replacing it.
+	inflight := s.inflight
 	s.mu.Unlock()
 
 	// If the connection drops while waiting we should abort
@@ -376,7 +382,7 @@ func (s *State) AddToSession(ctx context.Context, packet session.Packet, resp ch
 
 	// Ensure only "RECEIVE MAXIMUM" PUBLISH transactions are in flight at any time
 	if pt == packets.PUBLISH {
-		if err := s.inflight.Acquire(ctx); err != nil {
+		if err := inflight.Acquire(ctx); err != nil {
 			if connCtx.Err() != nil {
 				return session.ErrNoConnection
 			}
@@ -392,7 +398,7 @@ func (s *State) AddToSession(ctx context.Context, packet session.Packet, resp ch
 	packetID, err := s.allocateNextPacketId(pt, resp)
 	if err != nil {
 		if pt == packets.PUBLISH {
-			if qErr := s.inflight.Release(); qErr != nil {
+			if qErr := inflight.Release(); qErr != nil {
 				s.errors.Printf("quota release due to packet id issue: %s", qErr)
 			}
 		}
@@ -404,7 +410,7 @@ func (s *State) AddToSession(ctx context.Context, packet session.Packet, resp ch
 			s.mu.Lock()
 			delete(s.clientPackets, packetID)
 			s.mu.Unlock()
-			if qErr := s.inflight.Release(); qErr != nil {
+			if qErr := inflight.Release(); qErr != nil {
 				s.errors.Printf("quota release due to store issue: %s", qErr)
 			}
 			packet.SetIdentifier(0) // ensure the Message identifier is not used
