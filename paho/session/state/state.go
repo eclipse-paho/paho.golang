@@ -42,8 +42,8 @@ import (
 // > resend messages at any other time
 //
 // There are a few other areas where the State is important:
-//    * When allocating a new packet identifier we need to know what Id's are already in the session state.
-//    * If a QOS2 Publish with `DUP=TRUE` is received then we should not pass it to the client if we have previously
+//    * When allocating a new packet identifier, we need to know what IDs are already in the session state.
+//    * If a QOS2 Publish with `DUP=TRUE` is received, then we should not pass it to the client if we have previously
 //    sent a `PUBREC` (indicating that the message has already been processed).
 //    * Some subscribers may need a transaction (i.e. commit transaction when `PUBREL` received), this is not implemented
 //       here, but the option is left open.
@@ -79,7 +79,7 @@ type (
 		packetType byte // The type of the last packet sent (i.e. PUBLISH, SUBSCRIBE or UNSUBSCRIBE) - 0 means unknown until loaded from the store
 
 		// When a message is fully acknowledged, we need to let the requester know by sending the final response to this
-		// channel. One and only one message will be sent (the channel will then be closed to ensure this!).
+		// channel. One and only one message will be sent (and the channel closed).
 		// We also guarantee to always send to the channel (assuming there is a clean shutdown) so that the end user knows
 		// the status of the request.
 		responseChan chan<- packets.ControlPacket
@@ -89,7 +89,7 @@ type (
 // State manages the session state. The client will send messages that may impact the state via
 // us, and we will maintain the session state
 type State struct {
-	mu                    sync.Mutex // protects whole struct (operations should be quick, so the impact of multiple mutexes is likely to be low)
+	mu                    sync.Mutex // protects the whole struct
 	connectionLostAt      time.Time  // Time that the connection was lost
 	sessionExpiryInterval uint32     // The session expiry interval sent with the most recent CONNECT packet
 
@@ -98,13 +98,15 @@ type State struct {
 	connCtxCancel func()          // Cancels the above context
 
 	// client store - holds packets where the message ID was generated on the client (i.e. by paho.golang)
-	clientPackets map[uint16]clientGenerated // Store relating to messages sent TO the server
-	clientStore   storer                     // Used to store session state that survives connection loss
-	lastMid       uint16                     // The message ID most recently issued
+	clientPackets           map[uint16]clientGenerated // Store relating to messages sent TO the server
+	clientStore             storer                     // Used to store session state that survives connection loss
+	clientStoreResetPending bool                       // A failed reset must complete before stored packets can be reused
+	lastMid                 uint16                     // The message ID most recently issued
 
 	// server store - holds packets where the message ID was generated on the server
-	serverPackets map[uint16]byte // The last packet received from the server with this ID (cleared when the transaction is complete)
-	serverStore   storer          // Used to store session state that survives connection loss
+	serverPackets           map[uint16]byte // The last packet received from the server with this ID (cleared when the transaction is complete)
+	serverStore             storer          // Used to store session state that survives connection loss
+	serverStoreResetPending bool            // A failed reset must complete before stored packets can be reused
 
 	// The number of messages in flight needs to be limited, as per receive maximum received from the server.
 	inflight *sendQuota
@@ -136,13 +138,14 @@ func NewInMemory() *State {
 // Close closes the session state
 func (s *State) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.connectionLost(nil) // Connection may be up in which case we need to cleanup.
+	removed, err := s.connectionLost(nil) // Connection may be up in which case we need to cleanup.
 	for packetID, cg := range s.clientPackets {
-		cg.responseChan <- packets.ControlPacket{} // Default control packet indicates that we are shutting down (TODO: better solution?)
+		removed = append(removed, cg) // Want to notify without holding mu
 		delete(s.clientPackets, packetID)
 	}
-	return nil
+	s.mu.Unlock()
+	notifyRemoved(removed)
+	return err
 }
 
 // ConAckReceived will be called when the client receives a CONACK that indicates the connection has been successfully
@@ -151,14 +154,34 @@ func (s *State) Close() error {
 // others (we should not begin sending/receiving packets until after the CONACK has been processed).
 // TODO: Add errors() function so we can notify the client of errors whilst transmitting the session stuff?
 func (s *State) ConAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.Connack) error {
+	s.mu.Lock()
+	removed, err := s.conAckReceived(conn, cp, ca)
+	if err != nil {
+		s.clearConnection()
+	}
+	s.mu.Unlock()
+	notifyRemoved(removed)
+	return err
+}
+
+// conAckReceived handles the transition of state caused by the receipt of CONNACK. Returns any packets removed
+// from state.
+// The caller must hold s.mu.
+func (s *State) conAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.Connack) ([]clientGenerated, error) {
 	// We could use cp.Properties.SessionExpiryInterval /  ca.Properties.SessionExpiryInterval to clear the session
 	// after the specified time period (if the Session Expiry Interval is absent the value in the CONNECT Packet used)
-	// however, this is not something the generic client can really accomplish (forks may wish to do this!).
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// however, this is not something the generic client can really achieve (forks may wish to do this!).
+	var removed []clientGenerated
+	if err := s.resetPendingStores(); err != nil {
+		return nil, fmt.Errorf("failed to complete pending session cleanup: %w", err)
+	}
 	if s.conn != nil {
 		s.errors.Println("ConAckReceived called whilst connection active (you MUST call ConnectionLost before starting a new connection")
-		_ = s.connectionLost(nil) // assume the connection dropped
+		var err error
+		removed, err = s.connectionLost(nil) // assume the connection dropped
+		if err != nil {
+			return removed, fmt.Errorf("failed to clean up previous connection: %w", err)
+		}
 	}
 	s.conn = conn
 	s.connCtx, s.connCtxCancel = context.WithCancel(context.Background())
@@ -170,7 +193,11 @@ func (s *State) ConAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 	// packet. In both cases, it MUST set a 0x00 (Success) Reason Code in the CONNACK packet [MQTT-3.2.2-3].
 	if !ca.SessionPresent {
 		s.debug.Println("no session present - cleaning session state")
-		s.clean()
+		cleaned, err := s.clean()
+		removed = append(removed, cleaned...)
+		if err != nil {
+			return removed, fmt.Errorf("failed to clean session state: %w", err)
+		}
 	}
 	inFlight := uint16(len(s.clientPackets))
 	s.debug.Printf("%d inflight transactions upon connection", inFlight)
@@ -194,7 +221,7 @@ func (s *State) ConAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 
 	if s.serverPackets == nil {
 		if err := s.loadServerSession(ca); err != nil {
-			return fmt.Errorf("failed to server session: %w", err)
+			return removed, fmt.Errorf("failed to load server session: %w", err)
 		}
 	}
 
@@ -209,7 +236,7 @@ func (s *State) ConAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 	// the sending them before returning.
 	toResend, err := s.clientStore.List()
 	if err != nil {
-		return fmt.Errorf("failed to load stored message ids: %w", err)
+		return removed, fmt.Errorf("failed to load stored message ids: %w", err)
 	}
 	s.debug.Printf("retransmitting %d messages", len(toResend))
 	for _, id := range toResend {
@@ -254,25 +281,26 @@ func (s *State) ConAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 		// Any failure from this point should result in loss of connection (so fatal)
 		if _, err := p.WriteTo(conn); err != nil {
 			s.debug.Printf("retransmitting of identifier %d failed: %s", id, err)
-			return fmt.Errorf("failed to retransmit message (%d): %w", id, err)
+			return removed, fmt.Errorf("failed to retransmit message (%d): %w", id, err)
 		}
 		s.debug.Printf("retransmitted message with identifier %d", id)
 		// On initial connection, the packet needs to be added to our record of client-generated packets.
 		if _, ok := s.clientPackets[id]; !ok {
+			response := make(chan packets.ControlPacket, 1)
 			s.clientPackets[id] = clientGenerated{
 				packetType:   p.Type,
-				responseChan: make(chan packets.ControlPacket, 1), // Nothing will wait on this
+				responseChan: response, // Nothing will wait on this
 			}
 		}
 	}
-	return nil
+	return removed, nil
 }
 
 // loadServerSession should be called once, when the first connection is established.
 // It loads the server session state from the store.
 // The caller must hold a lock on s.mu
 func (s *State) loadServerSession(ca *packets.Connack) error {
-	s.serverPackets = make(map[uint16]byte)
+	serverPackets := make(map[uint16]byte)
 	ids, err := s.serverStore.List()
 	if err != nil {
 		return fmt.Errorf("failed to load stored server message ids: %w", err)
@@ -283,7 +311,7 @@ func (s *State) loadServerSession(ca *packets.Connack) error {
 			s.errors.Printf("failed to load packet %d from server store: %s", id, err)
 			continue
 		}
-		// We only need to know the packet type so there is no need to process the entire packet
+		// We only need to know the packet type, so there is no need to process the entire packet
 		byte1 := make([]byte, 1)
 		_, err = r.Read(byte1)
 		_ = r.Close()
@@ -292,22 +320,23 @@ func (s *State) loadServerSession(ca *packets.Connack) error {
 				s.errors.Printf("failed to quarantine packet %d from server store (failed to read): %s", id, err)
 			}
 			s.errors.Printf("packet %d from server store could not be read: %s", id, err)
-			continue // don't want to fail so quarantine and continue is the best we can do
+			continue // don't want to fail, so quarantine and continue is the best we can do
 		}
 		packetType := byte1[0] >> 4
 		switch packetType {
 		case packets.PUBLISH:
-			s.serverPackets[id] = packets.PUBLISH
+			serverPackets[id] = packets.PUBLISH
 		case packets.PUBREC:
-			s.serverPackets[id] = packets.PUBREC
+			serverPackets[id] = packets.PUBREC
 		default:
 			if err := s.serverStore.Quarantine(id); err != nil {
 				s.errors.Printf("failed to quarantine packet %d from server store: %s", id, err)
 			}
 			s.errors.Printf("packet %d from server store had unexpected type %d", id, packetType)
-			continue // don't want to fail so quarantine and continue is the best we can do
+			continue // don't want to fail, so quarantine and continue is the best we can do
 		}
 	}
+	s.serverPackets = serverPackets
 	return nil
 }
 
@@ -315,19 +344,21 @@ func (s *State) loadServerSession(ca *packets.Connack) error {
 // to a network error (`nil` will be passed in)
 func (s *State) ConnectionLost(dp *packets.Disconnect) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.connectionLost(dp)
+	removed, err := s.connectionLost(dp)
+	s.mu.Unlock()
+	notifyRemoved(removed)
+	return err
 }
 
 // connectionLost process loss of connection
 // Caller MUST have locked c.Mu
-func (s *State) connectionLost(dp *packets.Disconnect) error {
+func (s *State) connectionLost(dp *packets.Disconnect) ([]clientGenerated, error) {
 	if s.conn == nil {
-		return nil // ConnectionLost may be called multiple times (but call ref Disconnect packet should be first)
+		// ConnectionLost may be called multiple times. A later call is also an opportunity to finish a store reset that
+		// failed while the connection was being torn down.
+		return nil, s.resetPendingStores()
 	}
-	s.connCtxCancel()
-	s.conn, s.connCtx, s.connCtxCancel = nil, nil, nil
-	s.connectionLostAt = time.Now()
+	s.clearConnection()
 
 	if dp != nil && dp.Properties != nil && dp.Properties.SessionExpiryInterval != nil {
 		s.sessionExpiryInterval = *dp.Properties.SessionExpiryInterval
@@ -336,25 +367,46 @@ func (s *State) connectionLost(dp *packets.Disconnect) error {
 	// Interval is greater than 0 [MQTT-3.1.2-23]
 	if s.sessionExpiryInterval == 0 {
 		s.debug.Println("sessionExpiryInterval is 0 and connection lost - cleaning session state")
-		s.clean()
+		return s.clean()
 	}
-	return nil
+	return s.tidy(), nil
+}
+
+// clearConnection marks the current network connection as unavailable. The old quota is retained while disconnected so
+// acknowledgements already read from that connection can safely unwind transactions. A successful CONNACK replaces it.
+// The caller must hold s.mu.
+func (s *State) clearConnection() {
+	if s.connCtxCancel != nil {
+		s.connCtxCancel()
+	}
+	s.conn, s.connCtx, s.connCtxCancel = nil, nil, nil
+	s.connectionLostAt = time.Now()
 }
 
 // AddToSession adds a packet to the session state (including allocation of a Message Identifier).
-// If this function returns a nil then:
+// If this function returns a nil error then:
 //   - A slot has been allocated if the packet is a PUBLISH (function will block if RECEIVE MAXIMUM messages are inflight)
 //   - A message Identifier has been added to the passed in packet
 //   - Publish messages will have been written to the store (and will be automatically transmitted if a new connection
 //     is established before the message is fully acknowledged - subject to state rules in the MQTTv5 spec)
-//   - Something will be sent to `resp` when either the message is fully acknowledged or the packet is removed from
-//     the session (in which case nil will be sent).
+//   - A state-owned response channel is returned. Exactly one value will be sent when either the message is fully
+//     acknowledged or the packet is removed from the session (in which case the zero value will be sent), after which
+//     the channel will be closed.
 //
-// If the function returns an error, then any actions taken will be rewound prior to return.
-func (s *State) AddToSession(ctx context.Context, packet session.Packet, resp chan<- packets.ControlPacket) error {
+// If the function returns an error, the response channel will be nil and any actions taken will be rewound prior to
+// return.
+func (s *State) AddToSession(ctx context.Context, packet session.Packet) (<-chan packets.ControlPacket, error) {
+	response := make(chan packets.ControlPacket, 1)
+	if err := s.addToSession(ctx, packet, response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
+func (s *State) addToSession(ctx context.Context, packet session.Packet, response chan<- packets.ControlPacket) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	s.mu.Lock() // There may be a delay waiting for semaphore so check for connection before and after
+	s.mu.Lock() // There may be a delay waiting for semaphore, so check for connection before and after
 	if s.conn == nil {
 		s.mu.Unlock()
 		return session.ErrNoConnection
@@ -365,11 +417,11 @@ func (s *State) AddToSession(ctx context.Context, packet session.Packet, resp ch
 	// replaced by ConAckReceived when a new connection is established. Take a
 	// reference to it here, under the mutex, rather than reading s.inflight later:
 	// Acquire may block, so it cannot be called while holding the mutex, and reading
-	// the field after unlocking races a reconnect replacing it.
+	// the field after unlocking races a reconnection replacing it.
 	inflight := s.inflight
 	s.mu.Unlock()
 
-	// If the connection drops while waiting we should abort
+	// If the connection drops while waiting, we should abort
 	go func() {
 		select {
 		case <-connCtx.Done():
@@ -390,13 +442,22 @@ func (s *State) AddToSession(ctx context.Context, packet session.Packet, resp ch
 		}
 	}
 
-	// We have a slot, so acquire a Message ID
-	// Need to look at what to do if this fails. Should be infrequent as:
-	//     its a lot of messages
-	//     receive max often defaults to a fairly low value
-	//     Maximum recieve max is 65535 which matches the number of slots (so would also need a SUB/UNSUB in flight).
-	packetID, err := s.allocateNextPacketId(pt, resp)
+	// We need the mutex again, so we recheck the connection as this may have been replaced.
+	s.mu.Lock()
+	if s.conn == nil || s.connCtx != connCtx {
+		s.mu.Unlock()
+		if pt == packets.PUBLISH {
+			if qErr := inflight.Release(); qErr != nil {
+				s.errors.Printf("quota release due to connection loss: %s", qErr)
+			}
+		}
+		return session.ErrNoConnection
+	}
+
+	// We have a slot, so acquire a Message ID (error on failure, there may be a better option?)
+	packetID, err := s.allocateNextPacketIdLocked(pt, response)
 	if err != nil {
+		s.mu.Unlock()
 		if pt == packets.PUBLISH {
 			if qErr := inflight.Release(); qErr != nil {
 				s.errors.Printf("quota release due to packet id issue: %s", qErr)
@@ -407,7 +468,6 @@ func (s *State) AddToSession(ctx context.Context, packet session.Packet, resp ch
 	packet.SetIdentifier(packetID)
 	if pt == packets.PUBLISH {
 		if err = s.clientStore.Put(packetID, pt, packet); err != nil {
-			s.mu.Lock()
 			delete(s.clientPackets, packetID)
 			s.mu.Unlock()
 			if qErr := inflight.Release(); qErr != nil {
@@ -417,6 +477,7 @@ func (s *State) AddToSession(ctx context.Context, packet session.Packet, resp ch
 			return err
 		}
 	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -426,12 +487,14 @@ func (s *State) endClientGenerated(packetID uint16, recv *packets.ControlPacket)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if cg, ok := s.clientPackets[packetID]; ok {
-		cg.responseChan <- *recv
+		complete(cg, *recv)
 		delete(s.clientPackets, packetID)
 		// Outgoing publish messages will be in the store (replaced with PUBREL that is sent)
 		if cg.packetType == packets.PUBLISH || cg.packetType == packets.PUBREL {
-			if qErr := s.inflight.Release(); qErr != nil {
-				s.errors.Printf("quota release due to %s: %s", recv.PacketType(), qErr)
+			if s.inflight != nil {
+				if qErr := s.inflight.Release(); qErr != nil {
+					s.errors.Printf("quota release due to %s: %s", recv.PacketType(), qErr)
+				}
 			}
 			if err := s.clientStore.Delete(packetID); err != nil {
 				s.errors.Printf("failed to remove message %d from store: %s", packetID, err)
@@ -531,17 +594,31 @@ func (s *State) PacketReceived(recv *packets.ControlPacket, pubChan chan<- *pack
 	case *packets.Pubrec: // Initial response to a QOS2 Publish
 		s.debug.Println("received PUBREC packet with id ", rp.PacketID)
 		s.mu.Lock()
-		_, ok := s.clientPackets[rp.PacketID]
+		cg, ok := s.clientPackets[rp.PacketID]
+		validTransaction := ok && (cg.packetType == packets.PUBLISH || cg.packetType == packets.PUBREL)
+		conn := s.conn
+		var storeErr error
+		if validTransaction && rp.ReasonCode < 0x80 {
+			pl := packets.Pubrel{PacketID: rp.PacketID}
+			storeErr = s.clientStore.Put(rp.PacketID, packets.PUBREL, &pl)
+			if storeErr == nil {
+				cg.packetType = packets.PUBREL
+				s.clientPackets[rp.PacketID] = cg
+			}
+		}
 		s.mu.Unlock()
-		if !ok {
+		if !validTransaction {
 			pl := packets.Pubrel{ // Respond with "Packet Identifier not found"
 				PacketID:   recv.Content.(*packets.Pubrec).PacketID,
 				ReasonCode: 0x92,
 			}
 			s.debug.Println("sending PUBREL (unknown ID) for ", pl.PacketID)
-			_, err := pl.WriteTo(s.conn)
-			if err != nil {
+			if conn == nil {
+				return session.ErrNoConnection
+			}
+			if _, err := pl.WriteTo(conn); err != nil {
 				s.errors.Printf("failed to send PUBREL for %d: %s", pl.PacketID, err)
+				return err
 			}
 		} else {
 			if rp.ReasonCode >= 0x80 {
@@ -551,12 +628,16 @@ func (s *State) PacketReceived(recv *packets.ControlPacket, pubChan chan<- *pack
 					PacketID: rp.PacketID,
 				}
 				s.debug.Println("sending PUBREL for", rp.PacketID)
-				// Update the store (we should never resend the PUBLISH after receiving a PUBREL)
-				if err := s.clientStore.Put(rp.PacketID, packets.PUBREL, &pl); err != nil {
-					s.errors.Printf("failed to write PUBREL to store for %d: %s", rp.PacketID, err)
+				if storeErr != nil {
+					s.errors.Printf("failed to write PUBREL to store for %d: %s", rp.PacketID, storeErr)
+					return storeErr
 				}
-				if _, err := pl.WriteTo(s.conn); err != nil {
+				if conn == nil {
+					return session.ErrNoConnection
+				}
+				if _, err := pl.WriteTo(conn); err != nil {
 					s.errors.Printf("failed to send PUBREL for %d: %s", rp.PacketID, err)
+					return err
 				}
 			}
 		}
@@ -639,13 +720,23 @@ func (s *State) PacketReceived(recv *packets.ControlPacket, pubChan chan<- *pack
 
 // allocateNextPacketId assigns the next available packet ID
 // Callers must NOT hold lock on s.mu
-func (s *State) allocateNextPacketId(forPacketType byte, resp chan<- packets.ControlPacket) (uint16, error) {
-	s.mu.Lock() // There may be a delay waiting for semaphore so check for connection before and after
+func (s *State) allocateNextPacketId(forPacketType byte) (uint16, <-chan packets.ControlPacket, error) {
+	response := make(chan packets.ControlPacket, 1)
+	s.mu.Lock()
 	defer s.mu.Unlock()
+	packetID, err := s.allocateNextPacketIdLocked(forPacketType, response)
+	if err != nil {
+		return 0, nil, err
+	}
+	return packetID, response, nil
+}
 
+// allocateNextPacketIdLocked assigns the next available packet ID.
+// The caller must hold s.mu.
+func (s *State) allocateNextPacketIdLocked(forPacketType byte, response chan<- packets.ControlPacket) (uint16, error) {
 	cg := clientGenerated{
 		packetType:   forPacketType,
-		responseChan: resp,
+		responseChan: response,
 	}
 
 	// Scan from lastMid to end of range.
@@ -676,19 +767,52 @@ func (s *State) allocateNextPacketId(forPacketType byte, resp chan<- packets.Con
 	return 0, session.ErrPacketIdentifiersExhausted
 }
 
-// clean deletes any existing stored session information
+// clean deletes any existing stored session information (returning the client packets removed)
 // does not touch inflight because this is not part of the session state (so is reset separately)
 // caller is responsible for locking s.mu
-func (s *State) clean() {
+func (s *State) clean() ([]clientGenerated, error) {
 	s.debug.Println("State.clean() called")
+	removed := make([]clientGenerated, 0, len(s.clientPackets))
+	for _, p := range s.clientPackets {
+		removed = append(removed, p)
+	}
 	s.serverPackets = make(map[uint16]byte)
 	s.clientPackets = make(map[uint16]clientGenerated)
 
-	s.serverStore.Reset()
-	s.clientStore.Reset()
+	// It's important that the stores are reset before another connection is accepted (otherwise we
+	// may transmit data we should not). As such we signal that this is needed and it's done at the
+	// start of `conAckReceived`. Note that it's possible that this info is lost across an application
+	// restart, but addressing that would require additional persistence (and is fairly unlikely).
+	s.serverStoreResetPending = true
+	s.clientStoreResetPending = true
+	return removed, s.resetPendingStores()
 }
 
-// clean deletes any existing stored session information
+// resetPendingStores completes any store cleanup required by a prior connection state change. A store remains
+// pending until Reset succeeds, and ConAckReceived will not load or retransmit session state while either store is pending.
+// The caller must hold s.mu.
+func (s *State) resetPendingStores() error {
+	var serverErr, clientErr error
+	if s.serverStoreResetPending {
+		if err := s.serverStore.Reset(); err != nil {
+			serverErr = fmt.Errorf("failed to reset server store: %w", err)
+		} else {
+			s.serverStoreResetPending = false
+		}
+	}
+	if s.clientStoreResetPending {
+		if err := s.clientStore.Reset(); err != nil {
+			clientErr = fmt.Errorf("failed to reset client store: %w", err)
+		} else {
+			s.clientStoreResetPending = false
+		}
+	}
+	return errors.Join(serverErr, clientErr)
+}
+
+// tidy removes transactions that are scoped to one network connection while
+// retaining the MQTT session state that should survive reconnection.
+// returns the packets that were removed.
 // as per section 4.1 in the spec; The Session State in the Client consists of:
 // > · QoS 1 and QoS 2 messages which have been sent to the Server, but have not been completely acknowledged.
 // > · QoS 2 messages which have been received from the Server, but have not been completely acknowledged.
@@ -697,7 +821,7 @@ func (s *State) clean() {
 // confirm if they have already been processed).
 // We only resend PUBLISH (where QoS > 0) and PUBREL packets (as per spec section 4.4)
 // caller is responsible for locking s.mu
-func (s *State) tidy(trigger *packets.ControlPacket) {
+func (s *State) tidy() []clientGenerated {
 	s.debug.Println("State.tidy() called")
 	for id, p := range s.serverPackets {
 		switch p {
@@ -707,18 +831,22 @@ func (s *State) tidy(trigger *packets.ControlPacket) {
 			// The broker will resend any `PUBLISH` and `PUBREL` messages, so there is no need to retain those.
 		default:
 			delete(s.serverPackets, id)
-			s.serverStore.Delete(id)
+			if err := s.serverStore.Delete(id); err != nil {
+				s.errors.Printf("failed to remove server packet %d while tidying session: %s", id, err)
+			}
 		}
 	}
 
+	var removed []clientGenerated
 	for id, p := range s.clientPackets {
-		// We only need to remember `PUBLISH` and `PUBREL` messages (both originating from a PUBLISH)
-		if p.packetType != packets.PUBLISH {
-			delete(s.clientPackets, id)
-			s.clientStore.Delete(id)
-			p.responseChan <- packets.ControlPacket{}
+		// We only need to remember PUBLISH and PUBREL messages (both originating from a PUBLISH).
+		if p.packetType == packets.PUBLISH || p.packetType == packets.PUBREL {
+			continue
 		}
+		delete(s.clientPackets, id)
+		removed = append(removed, p)
 	}
+	return removed
 }
 
 // SetDebugLogger takes an instance of the paho Logger interface
@@ -733,13 +861,20 @@ func (s *State) SetErrorLogger(l paholog.Logger) {
 	s.errors = l
 }
 
-// AllocateClientPacketIDForTest is intended for use in tests only. It allocates a packet ID in the client session state
-// This feels like a hack but makes it easier to test packet identifier exhaustion
-func (s *State) AllocateClientPacketIDForTest(packetID uint16, forPacketType byte, resp chan<- packets.ControlPacket) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.clientPackets[packetID] = clientGenerated{
-		packetType:   forPacketType,
-		responseChan: resp,
+// notifyRemoved releases callers whose transactions were discarded during a connection or session transition.
+// Notifications happen outside s.mu so a slow receiver cannot block all other state operations.
+func notifyRemoved(removed []clientGenerated) {
+	for _, p := range removed {
+		complete(p, packets.ControlPacket{})
 	}
+}
+
+// complete delivers the one response promised for a client-generated transaction. State-owned channels are buffered
+// and closed after the send; caller-owned channels retain the original SessionManager behavior.
+func complete(transaction clientGenerated, response packets.ControlPacket) {
+	if transaction.responseChan == nil {
+		return
+	}
+	transaction.responseChan <- response
+	close(transaction.responseChan)
 }

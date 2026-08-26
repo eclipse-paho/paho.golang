@@ -358,7 +358,7 @@ func (c *Client) Connect(ctx context.Context, cp *Connect) (*Connack, error) {
 		defer c.workers.Done()
 		defer c.debug.Println("returning from ping handler worker")
 		if err := c.config.PingHandler.Run(clientCtx, c.config.Conn, keepalive); err != nil {
-			go c.error(fmt.Errorf("ping handler error: %w", err))
+			c.reportError(fmt.Errorf("ping handler error: %w", err))
 		}
 	}()
 
@@ -491,14 +491,14 @@ func (c *Client) incoming(ctx context.Context) {
 		default:
 			recv, err := packets.ReadPacket(c.config.Conn)
 			if err != nil {
-				go c.error(err)
+				c.reportError(err)
 				return
 			}
 			c.config.PingHandler.PacketReceived()
 			switch recv.Type {
 			case packets.CONNACK:
 				c.debug.Println("received CONNACK (unexpected)")
-				go c.error(fmt.Errorf("received unexpected CONNACK"))
+				c.reportError(fmt.Errorf("received unexpected CONNACK"))
 				return
 			case packets.AUTH:
 				c.debug.Println("received AUTH")
@@ -519,7 +519,7 @@ func (c *Client) incoming(ctx context.Context) {
 				case packets.AuthContinueAuthentication:
 					if c.config.AuthHandler != nil {
 						if _, err := c.config.AuthHandler.Authenticate(AuthFromPacketAuth(ap)).Packet().WriteTo(c.config.Conn); err != nil {
-							go c.error(err)
+							c.reportError(err)
 							return
 						}
 						c.config.PingHandler.PacketSent()
@@ -528,7 +528,9 @@ func (c *Client) incoming(ctx context.Context) {
 			case packets.PUBLISH:
 				pb := recv.Content.(*packets.Publish)
 				if pb.QoS > 0 { // QOS1 or 2 need to be recorded in session state
-					c.config.Session.PacketReceived(recv, c.publishPackets)
+					if c.handleSessionPacketError(ctx, recv.Type, c.config.Session.PacketReceived(recv, c.publishPackets)) {
+						return
+					}
 				} else {
 					c.debug.Printf("received QoS%d PUBLISH", pb.QoS)
 					select {
@@ -538,7 +540,9 @@ func (c *Client) incoming(ctx context.Context) {
 					}
 				}
 			case packets.PUBACK, packets.PUBCOMP, packets.SUBACK, packets.UNSUBACK, packets.PUBREC, packets.PUBREL:
-				c.config.Session.PacketReceived(recv, c.publishPackets)
+				if c.handleSessionPacketError(ctx, recv.Type, c.config.Session.PacketReceived(recv, c.publishPackets)) {
+					return
+				}
 			case packets.DISCONNECT:
 				pd := recv.Content.(*packets.Disconnect)
 				c.debug.Println("received DISCONNECT")
@@ -550,14 +554,24 @@ func (c *Client) incoming(ctx context.Context) {
 					}
 				}
 				c.authResponseMu.Unlock()
-				c.config.Session.ConnectionLost(pd) // this may impact the session state
-				go func() {
-					if c.config.OnServerDisconnect != nil {
-						go c.serverDisconnect(DisconnectFromPacketDisconnect(pd))
-					} else {
-						go c.error(fmt.Errorf("server initiated disconnect"))
-					}
-				}()
+				if err := c.config.Session.ConnectionLost(pd); err != nil { // this may impact the session state
+					sessionErr := fmt.Errorf("session failed handling connection loss: %w", err)
+					disconnect := DisconnectFromPacketDisconnect(pd)
+					go func() {
+						c.close()
+						if c.config.OnServerDisconnect != nil {
+							go c.config.OnServerDisconnect(disconnect)
+						}
+						go c.config.OnClientError(sessionErr)
+					}()
+					return
+				}
+				if c.config.OnServerDisconnect != nil {
+					c.debug.Println("calling OnServerDisconnect")
+					go c.serverDisconnect(DisconnectFromPacketDisconnect(pd))
+				} else {
+					c.reportError(fmt.Errorf("server initiated disconnect"))
+				}
 				return
 			case packets.PINGRESP:
 				c.debug.Println("received PINGRESP")
@@ -565,6 +579,28 @@ func (c *Client) incoming(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// handleSessionPacketError reports errors raised while processing an incoming session packet. ErrNoConnection is an
+// expected shutdown race when the packet was read before cancellation but handled after session teardown.
+func (c *Client) handleSessionPacketError(ctx context.Context, packetType byte, err error) bool {
+	if err == nil {
+		return false
+	}
+	wrapped := fmt.Errorf("session failed handling packet type %d: %w", packetType, err)
+	if ctx.Err() != nil && errors.Is(err, session.ErrNoConnection) {
+		c.debug.Println("ignoring session packet error during shutdown:", wrapped)
+		return true
+	}
+	c.reportError(wrapped)
+	return true
+}
+
+// reportError records the error then starts shutdown asynchronously.
+// This sequence is used to avoid races in tests
+func (c *Client) reportError(e error) {
+	c.debug.Println("error called:", e)
+	go c.error(e)
 }
 
 // close terminates the connection and waits for a clean shutdown
@@ -582,7 +618,9 @@ func (c *Client) shutdown(done chan<- struct{}) {
 	c.debug.Println("conn closed")
 	c.acksTracker.reset()
 	c.debug.Println("acks tracker reset")
-	c.config.Session.ConnectionLost(nil)
+	if err := c.config.Session.ConnectionLost(nil); err != nil {
+		c.errors.Println("error updating session after connection loss", err)
+	}
 	if c.config.autoCloseSession {
 		if err := c.config.Session.Close(); err != nil {
 			c.errors.Println("error closing session", err)
@@ -599,14 +637,12 @@ func (c *Client) shutdown(done chan<- struct{}) {
 // which results in the other client goroutines terminating.
 // It also closes the client network connection.
 func (c *Client) error(e error) {
-	c.debug.Println("error called:", e)
 	c.close()
 	go c.config.OnClientError(e)
 }
 
 func (c *Client) serverDisconnect(d *Disconnect) {
 	c.close()
-	c.debug.Println("calling OnServerDisconnect")
 	go c.config.OnServerDisconnect(d)
 }
 
@@ -684,9 +720,9 @@ func (c *Client) Subscribe(ctx context.Context, s *Subscribe) (*Suback, error) {
 
 	c.debug.Printf("subscribing to %+v", s.Subscriptions)
 
-	ret := make(chan packets.ControlPacket, 1)
 	sp := s.Packet()
-	if err := c.config.Session.AddToSession(ctx, sp, ret); err != nil {
+	ret, err := c.config.Session.AddToSession(ctx, sp)
+	if err != nil {
 		return nil, err
 	}
 
@@ -749,9 +785,9 @@ func (c *Client) Subscribe(ctx context.Context, s *Subscribe) (*Suback, error) {
 // is returned from the function, along with any errors.
 func (c *Client) Unsubscribe(ctx context.Context, u *Unsubscribe) (*Unsuback, error) {
 	c.debug.Printf("unsubscribing from %+v", u.Topics)
-	ret := make(chan packets.ControlPacket, 1)
 	up := u.Packet()
-	if err := c.config.Session.AddToSession(ctx, up, ret); err != nil {
+	ret, err := c.config.Session.AddToSession(ctx, up)
+	if err != nil {
 		return nil, err
 	}
 
@@ -865,7 +901,7 @@ func (c *Client) PublishWithOptions(ctx context.Context, p *Publish, o PublishOp
 	case 0:
 		c.debug.Println("sending QoS0 message")
 		if _, err := pb.WriteTo(c.config.Conn); err != nil {
-			go c.error(err)
+			c.reportError(err)
 			return nil, err
 		}
 		c.config.PingHandler.PacketSent()
@@ -882,8 +918,8 @@ func (c *Client) publishQoS12(ctx context.Context, pb *packets.Publish, o Publis
 	pubCtx, cf := context.WithTimeout(ctx, c.config.PacketTimeout)
 	defer cf()
 
-	ret := make(chan packets.ControlPacket, 1)
-	if err := c.config.Session.AddToSession(pubCtx, pb, ret); err != nil {
+	ret, err := c.config.Session.AddToSession(pubCtx, pb)
+	if err != nil {
 		return nil, err
 	}
 
