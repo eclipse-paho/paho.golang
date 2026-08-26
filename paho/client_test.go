@@ -16,6 +16,7 @@
 package paho
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,6 +32,7 @@ import (
 	"github.com/eclipse/paho.golang/internal/basictestserver"
 	"github.com/eclipse/paho.golang/packets"
 	paholog "github.com/eclipse/paho.golang/paho/log"
+	"github.com/eclipse/paho.golang/paho/session"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -714,6 +717,152 @@ func TestReceiveServerDisconnectNoProps(t *testing.T) {
 	case <-rChan:
 	case <-time.After(time.Second):
 		t.Fatalf("Expected OnServerDisconnect to be called")
+	}
+}
+
+// connectionLostErrorSession implements SessionManager whilst overriding ConnectionLost.
+type connectionLostErrorSession struct {
+	session.SessionManager
+	err error
+}
+
+// ConnectionLost return the predefined error
+func (s *connectionLostErrorSession) ConnectionLost(*packets.Disconnect) error {
+	return s.err
+}
+
+// synchronousLogProbe provides a logger that waits for release before completing a Println
+type synchronousLogProbe struct {
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+// Println Log something - this waits for manual release before completing
+func (l *synchronousLogProbe) Println(...interface{}) {
+	l.once.Do(func() {
+		close(l.entered)
+		<-l.release
+	})
+}
+
+// Printf noop
+func (*synchronousLogProbe) Printf(string, ...interface{}) {}
+
+// TestReportErrorLogsBeforeStartingShutdown checks that reportError logs errors before
+// shutting down (not doing this can easily lead to data races)
+func TestReportErrorLogsBeforeStartingShutdown(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	c := NewClient(ClientConfig{Conn: packets.NewThreadSafeConn(clientConn)})
+	basicClientInitialisation(t.Context(), c)
+	logger := &synchronousLogProbe{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	c.SetDebugLogger(logger)
+	reported := make(chan struct{})
+	go func() {
+		c.reportError(errors.New("injected error"))
+		close(reported)
+	}()
+
+	select {
+	case <-logger.entered:
+	case <-time.After(time.Second):
+		t.Fatal("error was not logged")
+	}
+	select {
+	case <-c.done:
+		t.Fatal("shutdown completed before error logging returned")
+	default:
+	}
+	close(logger.release)
+	<-reported
+	<-c.done
+}
+
+// TestHandleSessionPacketErrorSuppressesShutdownRace checks for duplicate error on shutdown
+func TestHandleSessionPacketErrorSuppressesShutdownRace(t *testing.T) {
+	errorReceived := make(chan error, 1)
+	c := NewClient(ClientConfig{OnClientError: func(err error) { errorReceived <- err }})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if !c.handleSessionPacketError(ctx, packets.PUBREC, session.ErrNoConnection) {
+		t.Fatal("shutdown ErrNoConnection was not handled")
+	}
+	select {
+	case err := <-errorReceived:
+		t.Fatalf("OnClientError called during shutdown: %v", err)
+	default:
+	}
+}
+
+// TestReceiveServerDisconnectReportsSessionError confirms that session error is reported on disconnection
+func TestReceiveServerDisconnectReportsSessionError(t *testing.T) {
+	sessionErr := errors.New("injected connection loss failure")
+	errorReceived := make(chan error, 1)
+	disconnectReceived := make(chan struct{}, 1)
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+
+	c := NewClient(ClientConfig{
+		Conn:    packets.NewThreadSafeConn(clientConn),
+		Session: &connectionLostErrorSession{err: sessionErr},
+		OnClientError: func(err error) {
+			errorReceived <- err
+		},
+		OnServerDisconnect: func(*Disconnect) {
+			disconnectReceived <- struct{}{}
+		},
+	})
+	clientCtx := basicClientInitialisation(t.Context(), c)
+	c.publishPackets = make(chan *packets.Publish)
+	c.workers.Add(1)
+	go func() {
+		defer c.workers.Done()
+		c.incoming(clientCtx)
+	}()
+
+	if _, err := (&packets.Disconnect{}).WriteTo(serverConn); err != nil {
+		t.Fatalf("send DISCONNECT: %v", err)
+	}
+
+	select {
+	case err := <-errorReceived:
+		if !errors.Is(err, sessionErr) {
+			t.Fatalf("OnClientError received %v; want wrapped session error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("OnClientError was not called for the session error")
+	}
+	select {
+	case <-disconnectReceived:
+	case <-time.After(time.Second):
+		t.Fatal("OnServerDisconnect was not called after the session error")
+	}
+	<-c.done
+}
+
+// TestShutdownLogsSessionConnectionLostError confirms session error is reported on disconnect
+func TestShutdownLogsSessionConnectionLostError(t *testing.T) {
+	sessionErr := errors.New("injected shutdown connection loss failure")
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+
+	c := NewClient(ClientConfig{
+		Conn:    packets.NewThreadSafeConn(clientConn),
+		Session: &connectionLostErrorSession{err: sessionErr},
+	})
+	var logs bytes.Buffer
+	c.SetErrorLogger(log.New(&logs, "", 0))
+	done := make(chan struct{})
+
+	c.shutdown(done)
+
+	if !strings.Contains(logs.String(), sessionErr.Error()) {
+		t.Fatalf("error log %q does not contain the session error", logs.String())
 	}
 }
 

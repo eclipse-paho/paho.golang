@@ -19,39 +19,31 @@ import (
 	"math"
 	"math/rand"
 	"testing"
-	"time"
 
 	"github.com/eclipse/paho.golang/packets"
 	"github.com/eclipse/paho.golang/paho/session"
 	"github.com/stretchr/testify/assert"
 )
 
-// TestPacketIdAllocateAndFreeAll checks that we can allocate all packet identifiers and that, when freed, a message is always
-// sent to the response channel
+// TestPacketIdAllocateAndFreeAll checks that we can allocate all packet identifiers and that, when freed, a message is
+// always sent to the response channel
 func TestPacketIdAllocateAndFreeAll(t *testing.T) {
 	ss := NewInMemory()
 	ss.clientPackets = make(map[uint16]clientGenerated)
 	ss.inflight = newSendQuota(200) // not testing this but its needed for endClientGenerated to work
 
 	// Use full band
-	cpChan := make(chan packets.ControlPacket)
+	responses := make([]<-chan packets.ControlPacket, 0, midMax)
 	for i := uint16(1); i != 0; i++ {
-		v, _ := ss.allocateNextPacketId(packets.PUBLISH, cpChan)
+		v, response, _ := ss.allocateNextPacketId(packets.PUBLISH)
 		assert.Equal(t, i, v)
+		responses = append(responses, response)
 	}
 
 	// Trying to allocate another ID should fail
-	_, err := ss.allocateNextPacketId(packets.PUBLISH, cpChan)
+	_, response, err := ss.allocateNextPacketId(packets.PUBLISH)
 	assert.ErrorIs(t, err, session.ErrPacketIdentifiersExhausted)
-
-	// Free all Mids
-	allResponded := make(chan struct{})
-	go func() {
-		for i := uint16(0); i < midMax; i++ {
-			<-cpChan
-		}
-		close(allResponded)
-	}()
+	assert.Nil(t, response)
 
 	resp := packets.ControlPacket{
 		Content: nil,
@@ -62,42 +54,25 @@ func TestPacketIdAllocateAndFreeAll(t *testing.T) {
 	}
 	for i := uint16(1); i != 0; i++ {
 		assert.NoError(t, ss.endClientGenerated(i, &resp))
-	}
-	select {
-	case <-allResponded:
-	case <-time.After(time.Second):
-		t.Fatal("did not receive responses")
-	}
-	select {
-	case <-cpChan:
-		t.Fatal("unexpected response")
-	default:
+		if got, ok := <-responses[i-1]; !ok || got.Type != packets.PUBACK {
+			t.Fatalf("response for packet %d is type %d, open=%t; want PUBACK", i, got.Type, ok)
+		}
 	}
 
 	// Allocate all Mids again
+	responses = responses[:0]
 	for i := uint16(1); i != 0; i++ {
-		v, _ := ss.allocateNextPacketId(packets.PUBLISH, cpChan)
+		v, response, _ := ss.allocateNextPacketId(packets.PUBLISH)
 		assert.Equal(t, i, v)
+		responses = append(responses, response)
 	}
 
 	// Closing the store should free all Ids sending a message to the provided channel
-	gotCp := make(chan struct{})
-	go func() {
-		for i := uint16(0); i < midMax; i++ {
-			<-cpChan
+	assert.NoError(t, ss.Close())
+	for i, response := range responses {
+		if got, ok := <-response; !ok || got.Type != 0 {
+			t.Fatalf("close response for packet %d is type %d, open=%t; want zero value", i+1, got.Type, ok)
 		}
-		close(gotCp)
-	}()
-	ss.Close()
-	select {
-	case <-gotCp:
-	case <-time.After(time.Second):
-		t.Fatal("did not receive responses")
-	}
-	select {
-	case <-cpChan:
-		t.Fatal("unexpected response")
-	default:
 	}
 }
 
@@ -107,17 +82,9 @@ func TestPacketIdHoles(t *testing.T) {
 	ss.clientPackets = make(map[uint16]clientGenerated)
 	ss.inflight = newSendQuota(200) // not testing this but its needed for endClientGenerated to work
 
-	// For this test we ignore responses
-	cpChan := make(chan packets.ControlPacket)
-	defer close(cpChan)
-	go func() {
-		for range cpChan {
-		}
-	}()
-
 	// Allocate all Mids
 	for i := uint16(1); i != 0; i++ {
-		v, _ := ss.allocateNextPacketId(packets.PUBLISH, cpChan)
+		v, _, _ := ss.allocateNextPacketId(packets.PUBLISH)
 		assert.Equal(t, i, v)
 	}
 
@@ -140,7 +107,7 @@ func TestPacketIdHoles(t *testing.T) {
 	}
 	t.Log("Num of holes:", len(h))
 	for i := 0; i < len(h); i++ {
-		_, err := ss.allocateNextPacketId(packets.PUBLISH, cpChan)
+		_, _, err := ss.allocateNextPacketId(packets.PUBLISH)
 		assert.Nil(t, err)
 	}
 }

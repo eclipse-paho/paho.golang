@@ -58,10 +58,12 @@ type SessionManager interface {
 	//   - Publish messages will have been written to the store (and will be automatically transmitted if a new connection
 	//     is established before the message is fully acknowledged - subject to state rules in the MQTTv5 spec)
 	//   - Something will be sent to `resp` when either the message is fully acknowledged or the packet is removed from
-	//     the session (in which case nil will be sent).
+	//     the session (in which case the zero value will be sent).
 	//
 	// If the function returns an error, then any actions taken will be rewound prior to return.
-	AddToSession(ctx context.Context, packet Packet, resp chan<- packets.ControlPacket) error
+	// On success it returns a state-owned channel that receives exactly one response and is then closed.
+	// On error it returns a nil channel.
+	AddToSession(ctx context.Context, packet Packet) (<-chan packets.ControlPacket, error)
 
 	// PacketReceived must be called when any packet with a packet identifier is received. It will make any required
 	// response and pass any `PUBLISH` messages that need to be passed to the user via the channel.

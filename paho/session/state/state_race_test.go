@@ -74,11 +74,10 @@ func TestAddToSessionWhileReconnecting(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		resp := make(chan packets.ControlPacket, 1)
 		for range rounds {
 			pub := packets.NewControlPacket(packets.PUBLISH)
 			pub.Content.(*packets.Publish).QoS = 1
-			err := s.AddToSession(context.Background(), pub.Content.(*packets.Publish), resp)
+			_, err := s.AddToSession(context.Background(), pub.Content.(*packets.Publish))
 			if err != nil && err != session.ErrNoConnection {
 				// Anything else is a real failure; a lost connection is the
 				// expected outcome of racing a disconnect.
