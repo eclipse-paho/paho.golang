@@ -464,6 +464,94 @@ func TestClientReceiveQoS2(t *testing.T) {
 	<-rChan
 }
 
+// testHandlerDisconnector will implement disconnector. A handler that returns this is requesting
+// that the client drop the connection
+type testHandlerDisconnector struct {
+	packet *Disconnect
+	err    error
+}
+
+// Error error builtin
+func (e *testHandlerDisconnector) Error() string {
+	return e.err.Error()
+}
+
+// Disconnect returns the Disconnect packet to be sent to the server
+func (e *testHandlerDisconnector) Disconnect() *Disconnect {
+	return e.packet
+}
+
+// TestClientReceiveHandlerDisconnector verifies that a OnPublishReceived handler returning a
+// disconnector will cause the DIACONNECT packet to be sent and an error raised
+func TestClientReceiveHandlerDisconnector(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+
+	handlerErr := &testHandlerDisconnector{
+		packet: &Disconnect{
+			ReasonCode: packets.DisconnectImplementationSpecificError,
+			Properties: &DisconnectProperties{ReasonString: "handler requested disconnection"},
+		},
+		err: errors.New("handler failed"),
+	}
+	laterHandlerCalled := false
+	errorReceived := make(chan error, 1)
+	c := NewClient(ClientConfig{
+		Conn: clientConn,
+		OnPublishReceived: []func(PublishReceived) (bool, error){
+			func(PublishReceived) (bool, error) {
+				return false, handlerErr
+			},
+			func(PublishReceived) (bool, error) {
+				laterHandlerCalled = true
+				return false, nil
+			},
+		},
+		OnClientError: func(err error) { errorReceived <- err },
+	})
+
+	// connect and subscribe
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	c.done = done
+	var cancelOnce sync.Once
+	c.cancelFunc = func() {
+		cancel()
+		cancelOnce.Do(func() { close(done) })
+	}
+	c.publishPackets = make(chan *packets.Publish, 1)
+	c.publishPackets <- &packets.Publish{
+		PacketID:   1,
+		Topic:      "test/disconnect",
+		QoS:        1,
+		Properties: &packets.Properties{},
+	}
+	close(c.publishPackets)
+
+	// run the router in a go routine
+	routeDone := make(chan struct{})
+	go func() {
+		c.routePublishPackets()
+		close(routeDone)
+	}()
+
+	// All that should be sent over the network is a DISCONNECT
+	received, err := packets.ReadPacket(serverConn)
+	require.NoError(t, err)
+	require.Equal(t, byte(packets.DISCONNECT), received.Type)
+	disconnect := received.Content.(*packets.Disconnect)
+	assert.Equal(t, byte(packets.DisconnectImplementationSpecificError), disconnect.ReasonCode)
+	assert.Equal(t, "handler requested disconnection", disconnect.Properties.ReasonString)
+
+	<-routeDone // await disconnection
+	assert.False(t, laterHandlerCalled)
+	assert.ErrorIs(t, <-errorReceived, handlerErr)
+	assert.ErrorIs(t, ctx.Err(), context.Canceled)
+}
+
 func TestClientReceiveAndAckInOrder(t *testing.T) {
 	clientLogger := paholog.NewTestLogger(t, "ClientReceiveAndAckInOrder:")
 
