@@ -49,12 +49,16 @@ type Queue struct {
 	queueEmpty      bool              // true is the queue is currently empty
 	waiting         []chan<- struct{} // closed when something arrives in the queue
 	waitingForEmpty []chan<- struct{} // closed when queue is empty
+	lastOrderTime   time.Time         // last ModTime handed out by nextOrderTime (see that function for details)
 }
 
 // New creates a new file-based queue. Note that a file is written, read and deleted as part of this process to check
 // that the path is usable.
-// NOTE: Order is maintained using file ModTime, so there may be issues if the interval between messages is less than
-// the file system ModTime resolution.
+// NOTE: Order is maintained using file ModTime. This is set explicitly, using a monotonically increasing clock
+// (rather than relying upon the value automatically applied by the OS when the file is written), because some
+// platforms/filesystems only update ModTime with a coarse resolution meaning files written in rapid succession
+// could otherwise end up with an identical ModTime and be retrieved out of order (see
+// https://github.com/eclipse-paho/paho.golang/issues/342).
 func New(path string, prefix string, extension string) (*Queue, error) {
 	if len(extension) > 0 && extension[0] != '.' {
 		extension = "." + extension
@@ -172,7 +176,26 @@ func (q *Queue) put(p io.Reader) error {
 		_ = os.Remove(f.Name()) // Attempt to remove the partial file (not much we can do if this fails)
 		return err
 	}
+
+	// Explicitly stamp the ModTime using our own monotonically increasing clock (see nextOrderTime and the
+	// comment on New for why this is necessary). This is best-effort; if it fails the entry has still been
+	// safely written so there is no need to fail the whole operation (ordering may just be less reliable).
+	_ = os.Chtimes(f.Name(), time.Now(), q.nextOrderTime())
 	return nil
+}
+
+// nextOrderTime returns a time.Time that is guaranteed to be strictly later than any time previously returned by
+// this method on this Queue. It is used to stamp the ModTime of queue files so entries can always be retrieved in
+// the order they were enqueued, even on filesystems/platforms where ModTime is only updated with a coarse
+// resolution (which could otherwise cause files written in rapid succession to share an identical ModTime).
+// Caller must hold q.mu.
+func (q *Queue) nextOrderTime() time.Time {
+	t := time.Now()
+	if !t.After(q.lastOrderTime) {
+		t = q.lastOrderTime.Add(time.Nanosecond)
+	}
+	q.lastOrderTime = t
+	return t
 }
 
 // get() returns a ReadCloser that accesses the oldest file available

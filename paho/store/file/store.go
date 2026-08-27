@@ -35,8 +35,11 @@ const (
 
 // New creates a file Store. Note that a file is written, read and deleted as part of this process to check that the
 // path is usable.
-// NOTE: Order is maintained using file ModTime, so there may be issues if the interval between messages is less than
-// the file system ModTime resolution.
+// NOTE: Order is maintained using file ModTime. This is set explicitly, using a monotonically increasing clock
+// (rather than relying upon the value automatically applied by the OS when the file is written), because some
+// platforms/filesystems only update ModTime with a coarse resolution meaning files written in rapid succession
+// could otherwise end up with an identical ModTime and be listed out of order (see
+// https://github.com/eclipse-paho/paho.golang/issues/342).
 func New(path string, prefix string, extension string) (*Store, error) {
 	if len(extension) > 0 && extension[0] != '.' {
 		extension = "." + extension
@@ -73,6 +76,8 @@ type Store struct {
 	path       string
 	prefix     string
 	extension  string
+
+	lastOrderTime time.Time // last ModTime handed out by nextOrderTime (see that function for details)
 }
 
 // Put stores the packet
@@ -101,7 +106,26 @@ func (s *Store) Put(packetID uint16, packetType byte, w io.WriterTo) error {
 		_ = os.Remove(tmpFn)
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
+
+	// Explicitly stamp the ModTime using our own monotonically increasing clock (see nextOrderTime and the
+	// comment on New for why this is necessary). This is best-effort; if it fails the packet has still been
+	// safely stored so there is no need to fail the whole operation (ordering may just be less reliable).
+	_ = os.Chtimes(s.filePathForId(packetID), time.Now(), s.nextOrderTime())
 	return nil
+}
+
+// nextOrderTime returns a time.Time that is guaranteed to be strictly later than any time previously returned by
+// this method on this Store. It is used to stamp the ModTime of stored packet files so List can always return
+// packet IDs in the order they were Put, even on filesystems/platforms where ModTime is only updated with a
+// coarse resolution (which could otherwise cause files written in rapid succession to share an identical
+// ModTime). Caller must hold the Store's mutex.
+func (s *Store) nextOrderTime() time.Time {
+	t := time.Now()
+	if !t.After(s.lastOrderTime) {
+		t = s.lastOrderTime.Add(time.Nanosecond)
+	}
+	s.lastOrderTime = t
+	return t
 }
 
 // Get retrieves the requested packet
