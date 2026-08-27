@@ -70,6 +70,22 @@ func TestTopicAliasOnPublishReceivedNoAlias(t *testing.T) {
 	assert.Empty(t, ta.aliases)
 }
 
+// TestTopicAliasOnPublishReceivedEmptyTopicWithoutAlias must have an alias or a topic
+func TestTopicAliasOnPublishReceivedEmptyTopicWithoutAlias(t *testing.T) {
+	ta := newTopicAliasForTest()
+
+	handled, err := ta.OnPublishReceived(PublishReceived{
+		Packet: &Publish{Properties: &PublishProperties{}},
+	})
+
+	require.EqualError(t, err, "topic name must not be empty when topic alias is absent")
+	var disconnectErr *handlerDisconnectError
+	require.ErrorAs(t, err, &disconnectErr)
+	assert.Equal(t, byte(packets.DisconnectProtocolError), disconnectErr.Packet.ReasonCode)
+	assert.False(t, handled)
+	assert.Empty(t, ta.aliases)
+}
+
 func TestTopicAliasOnPublishReceivedUnknownAlias(t *testing.T) {
 	ta := newTopicAliasForTest()
 	c := &Client{clientProps: CommsProperties{TopicAliasMaximum: 100}}

@@ -39,19 +39,29 @@ func newTopicAliasHandler() func(PublishReceived) (bool, error) {
 
 // OnPublishReceived mutates the PUBLISH packet to resolve an alias.
 func (t *topicAlias) OnPublishReceived(pr PublishReceived) (bool, error) {
-	if pr.Packet == nil || pr.Packet.Properties == nil || pr.Packet.Properties.TopicAlias == nil {
+	if pr.Packet == nil {
 		return false, nil
 	}
-	alias := *pr.Packet.Properties.TopicAlias
-	if alias == 0 {
-		return false, topicAliasDisconnectError(fmt.Errorf("topic alias must be greater than zero"))
+	if pr.Packet.Properties == nil || pr.Packet.Properties.TopicAlias == nil {
+		// "It is a Protocol Error if the Topic Name is zero length and there is no Topic Alias."
+		if pr.Packet.Topic == "" {
+			return false, topicAliasDisconnectError(
+				packets.DisconnectProtocolError,
+				fmt.Errorf("topic name must not be empty when topic alias is absent"),
+			)
+		}
+		return false, nil // No alias in packet so nothing for us to do
 	}
-	if pr.Client != nil && alias > pr.Client.clientProps.TopicAliasMaximum {
-		return false, topicAliasDisconnectError(fmt.Errorf("topic alias %d exceeds maximum %d", alias, pr.Client.clientProps.TopicAliasMaximum))
+	alias := *pr.Packet.Properties.TopicAlias
+	if alias == 0 { // MQTT-3.3.2-8
+		return false, topicAliasDisconnectError(packets.DisconnectTopicAliasInvalid, fmt.Errorf("topic alias must be greater than zero"))
+	}
+	if pr.Client != nil && alias > pr.Client.clientProps.TopicAliasMaximum { // MQTT-3.3.2-11
+		return false, topicAliasDisconnectError(packets.DisconnectTopicAliasInvalid, fmt.Errorf("topic alias %d exceeds maximum %d", alias, pr.Client.clientProps.TopicAliasMaximum))
 	}
 	t.Lock()
 	defer t.Unlock()
-	// Possible the connection has changed, meaning we need to clear the map.
+	// Possible the connection has changed, meaning we need to clear the map [MQTT-3.3.2-7].
 	if pr.Client != nil && t.client != pr.Client {
 		clear(t.aliases)
 		t.client = pr.Client
@@ -72,14 +82,14 @@ func (t *topicAlias) OnPublishReceived(pr PublishReceived) (bool, error) {
 	}
 
 	// Client treats this as a protocol error and drops the connection.
-	return false, topicAliasDisconnectError(fmt.Errorf("topic alias %d not found", alias))
+	return false, topicAliasDisconnectError(packets.DisconnectTopicAliasInvalid, fmt.Errorf("topic alias %d not found", alias))
 }
 
 // topicAliasDisconnectError implements handlerDisconnectError, which will cause the client to disconnect.
-func topicAliasDisconnectError(err error) *handlerDisconnectError {
+func topicAliasDisconnectError(reasonCode byte, err error) *handlerDisconnectError {
 	return &handlerDisconnectError{
 		Packet: &Disconnect{
-			ReasonCode: packets.DisconnectTopicAliasInvalid,
+			ReasonCode: reasonCode,
 			Properties: &DisconnectProperties{ReasonString: err.Error()},
 		},
 		Err: err,
