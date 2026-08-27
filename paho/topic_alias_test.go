@@ -116,6 +116,7 @@ func TestTopicAliasOnPublishReceivedInvalidAlias(t *testing.T) {
 
 // TestTopicAliasWithClient confirms that topicAlias works with Client
 func TestTopicAliasWithClient(t *testing.T) {
+	ta := newTopicAliasForTest()
 	r := NewStandardRouter()
 
 	c := NewClient(ClientConfig{Router: r})

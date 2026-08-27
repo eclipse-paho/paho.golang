@@ -17,7 +17,6 @@ package paho
 
 import (
 	"reflect"
-	"sync"
 	"testing"
 
 	"github.com/eclipse/paho.golang/packets"
