@@ -148,6 +148,63 @@ func TestFileStoreNaming(t *testing.T) {
 
 }
 
+// TestFileStoreListOrderWithCoarseModTime is a regression test for
+// https://github.com/eclipse-paho/paho.golang/issues/342 - some platforms/filesystems only update a file's
+// ModTime with a coarse resolution, so files Put in rapid succession can end up sharing an identical ModTime.
+// If that happens List must still return packet IDs in Put order, so this test Puts a batch of packets with no
+// delay between them and confirms List preserves that order.
+func TestFileStoreListOrderWithCoarseModTime(t *testing.T) {
+	t.Parallel()
+	s, err := New(t.TempDir(), "orderTest", ".ext")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const count = 100
+	ids := make([]uint16, count)
+	for i := 0; i < count; i++ {
+		id := uint16(i + 1)
+		ids[i] = id
+		pcp := packets.NewControlPacket(packets.PUBLISH)
+		pcp.Content.(*packets.Publish).PacketID = id
+		pcp.Content.(*packets.Publish).QoS = 1
+		pcp.Content.(*packets.Publish).Payload = []byte(fmt.Sprintf("%d", id))
+
+		if err := s.Put(id, packets.PUBLISH, pcp); err != nil {
+			t.Fatalf("failed to put %d: %s", id, err)
+		}
+	}
+
+	rids, err := s.List()
+	if err != nil {
+		t.Fatalf("failed to list: %s", err)
+	}
+	if len(rids) != len(ids) {
+		t.Fatalf("List returned %d elements, expected %d", len(rids), len(ids))
+	}
+	for i, v := range rids {
+		if v != ids[i] {
+			t.Fatalf("List returned %v, expected %v", rids, ids)
+		}
+	}
+}
+
+// TestFileStoreNextOrderTimeMonotonic confirms that nextOrderTime always returns strictly increasing values,
+// even when called in a tight loop (i.e. faster than time.Now() itself may change) - this is what guarantees
+// List ordering is correct regardless of the OS/filesystem's ModTime resolution.
+func TestFileStoreNextOrderTimeMonotonic(t *testing.T) {
+	t.Parallel()
+	s := &Store{}
+	prev := s.nextOrderTime()
+	for i := 0; i < 10000; i++ {
+		next := s.nextOrderTime()
+		if !next.After(prev) {
+			t.Fatalf("nextOrderTime did not increase: prev=%s, next=%s", prev, next)
+		}
+		prev = next
+	}
+}
+
 // TestFileStoreBig creates a fully populated Store and checks things work
 // Adding messages would make the structure bigger but should have no impact on the struct functions.
 // Commenting this out as it's very slow!
