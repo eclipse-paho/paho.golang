@@ -1,34 +1,30 @@
-package paho
+package topicaliases
 
 import (
 	"fmt"
 	"sync"
 
 	"github.com/eclipse/paho.golang/packets"
+	"github.com/eclipse/paho.golang/paho"
 	"github.com/eclipse/paho.golang/paho/log"
 )
 
-// topic_alias handles aliases on received PUBLISH packets.
+// inbound_topic_alias handles aliases on received PUBLISH packets.
 
-// Note: This is in paho to retain backwards compatability (the functionality was previously in `router.go` so retaining
-// support for a default router would be challenging if it were moved). Prior to V1 support for the old router will be
-// removed and this code moved to extensions/topicaliases. Because of this, the functions are not exported (want to avoid
-// future breakage.
-
+// Note: This is currently a duplicate of code in `paho`. This version will become the master pre V1.0.
 type topicAlias struct {
 	sync.Mutex
 	aliases map[uint16]string // Holds current aliases
-	client  *Client           // Used to detect disconnects
+	client  *paho.Client      // Used to detect disconnects
 
 	debug log.Logger
 }
 
-// newTopicAliasHandler returns an OnPublishReceived callback that resolves inbound
+// NewTopicAliasHandler returns an OnPublishReceived callback that resolves inbound
 // topic aliases. Add it to ClientConfig.OnPublishReceived at the point where later
 // callbacks should begin seeing resolved topics. The handler resets its mappings
 // when AutoPaho supplies a new Client after reconnection.
-// Note: If you wish to use this in your own code, please use the copy in extensions/topicaliases.
-func newTopicAliasHandler() func(PublishReceived) (bool, error) {
+func NewTopicAliasHandler() func(paho.PublishReceived) (bool, error) {
 	t := &topicAlias{
 		aliases: make(map[uint16]string),
 		debug:   log.NOOPLogger{},
@@ -37,7 +33,7 @@ func newTopicAliasHandler() func(PublishReceived) (bool, error) {
 }
 
 // OnPublishReceived mutates the PUBLISH packet to resolve an alias.
-func (t *topicAlias) OnPublishReceived(pr PublishReceived) (bool, error) {
+func (t *topicAlias) OnPublishReceived(pr paho.PublishReceived) (bool, error) {
 	if pr.Packet == nil {
 		return false, nil
 	}
@@ -55,8 +51,8 @@ func (t *topicAlias) OnPublishReceived(pr PublishReceived) (bool, error) {
 	if alias == 0 { // MQTT-3.3.2-8
 		return false, topicAliasDisconnectError(packets.DisconnectTopicAliasInvalid, fmt.Errorf("topic alias must be greater than zero"))
 	}
-	if pr.Client != nil && alias > pr.Client.clientProps.TopicAliasMaximum { // MQTT-3.3.2-11
-		return false, topicAliasDisconnectError(packets.DisconnectTopicAliasInvalid, fmt.Errorf("topic alias %d exceeds maximum %d", alias, pr.Client.clientProps.TopicAliasMaximum))
+	if pr.Client != nil && alias > pr.Client.ClientProps().TopicAliasMaximum { // MQTT-3.3.2-11
+		return false, topicAliasDisconnectError(packets.DisconnectTopicAliasInvalid, fmt.Errorf("topic alias %d exceeds maximum %d", alias, pr.Client.ClientProps().TopicAliasMaximum))
 	}
 	t.Lock()
 	defer t.Unlock()
@@ -87,9 +83,9 @@ func (t *topicAlias) OnPublishReceived(pr PublishReceived) (bool, error) {
 // topicAliasDisconnectError implements handlerDisconnectError, which will cause the client to disconnect.
 func topicAliasDisconnectError(reasonCode byte, err error) *handlerDisconnectError {
 	return &handlerDisconnectError{
-		Packet: &Disconnect{
+		Packet: &paho.Disconnect{
 			ReasonCode: reasonCode,
-			Properties: &DisconnectProperties{ReasonString: err.Error()},
+			Properties: &paho.DisconnectProperties{ReasonString: err.Error()},
 		},
 		Err: err,
 	}
@@ -98,7 +94,7 @@ func topicAliasDisconnectError(reasonCode byte, err error) *handlerDisconnectErr
 // handlerDisconnectError may be returned by an OnPublishReceived callback to stop dispatching the current
 // PUBLISH and disconnect with the supplied packet. The current PUBLISH is not acknowledged.
 type handlerDisconnectError struct {
-	Packet *Disconnect
+	Packet *paho.Disconnect
 	Err    error
 }
 
@@ -123,6 +119,6 @@ func (e *handlerDisconnectError) Unwrap() error {
 }
 
 // Disconnect implements disconnector.
-func (e *handlerDisconnectError) Disconnect() *Disconnect {
+func (e *handlerDisconnectError) Disconnect() *paho.Disconnect {
 	return e.Packet
 }

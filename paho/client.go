@@ -86,8 +86,8 @@ type (
 		// created via the AddOnPublishReceived function (Client holds a copy of the slice; OnPublishReceived will not change).
 		// When a `PUBLISH` is received, the callbacks will be called in order. If a callback processes the message,
 		// then it should return true. This boolean, and any errors, will be passed to later handlers.
-		// Topic aliases are not resolved automatically for these callbacks; add newTopicAliasHandler() at the point
-		// in the slice where later callbacks should begin seeing resolved topics.
+		// Topic aliases are not resolved automatically for these callbacks; add `topicaliases.NewTopicAliasHandler()`
+		// at the point in the slice where later callbacks should begin seeing resolved topics.
 		// Returning an error that implements Disconnect() *Disconnect stops dispatch and closes the connection using
 		// the returned DISCONNECT packet.
 		OnPublishReceived []func(PublishReceived) (bool, error)
@@ -149,7 +149,7 @@ type (
 	CommsProperties struct {
 		MaximumPacketSize    uint32
 		ReceiveMaximum       uint16
-		TopicAliasMaximum    uint16
+		TopicAliasMaximum    uint16 // Note: If you set this, consider using `topicaliases.NewTopicAliasHandler()`
 		MaximumQoS           byte
 		RetainAvailable      bool
 		WildcardSubAvailable bool
@@ -1103,6 +1103,12 @@ idLoop:
 // ClientID retrieves the client ID from the config (sometimes used in handlers that require the ID)
 func (c *Client) ClientID() string {
 	return c.config.ClientID
+}
+
+// ClientProps returns client properties.
+// Must only be called after Connect has returned (as this is where client properties are written)
+func (c *Client) ClientProps() CommsProperties {
+	return c.clientProps
 }
 
 // SetDebugLogger takes an instance of the paho Logger interface

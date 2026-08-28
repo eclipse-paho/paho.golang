@@ -145,6 +145,14 @@ Topic aliases are not part of the session state. This means that if messages usi
 connection drops and then sent when it comes up will not have the desired impact. Possible workaround would be to detect
 these and cancel them all when the connection drops.
 
+### Inbound topic Aliases
+
+The library and standard router do not handle inbound topic aliases by default (these will not be used by the broker
+unless you set `TopicAliasMaximum`). If you wish to use inbound aliases then set `TopicAliasMaximum` and add
+`topicaliases.NewTopicAliasHandler()` to the start of your `OnPublishReceived` slice (if you want aliases expanded
+before the message reaches your code).
+
+
 ### Multiple Servers
 
 If a Client may connect to more than one server, or the same server with different ClientIDs, then the user will need to 

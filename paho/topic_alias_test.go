@@ -96,7 +96,7 @@ func TestTopicAliasOnPublishReceivedUnknownAlias(t *testing.T) {
 	require.EqualError(t, err, "topic alias 99 not found")
 	var disconnectErr *handlerDisconnectError
 	require.ErrorAs(t, err, &disconnectErr)
-	assert.Equal(t, byte(packets.DisconnectTopicAliasInvalid), disconnectErr.Packet.ReasonCode)
+	assert.Equal(t, byte(packets.DisconnectProtocolError), disconnectErr.Packet.ReasonCode)
 	assert.False(t, handled)
 }
 
@@ -223,7 +223,7 @@ func TestTopicAliasHandlerResetsForNewClient(t *testing.T) {
 	})
 	var disconnectErr *handlerDisconnectError
 	require.ErrorAs(t, err, &disconnectErr)
-	assert.Equal(t, byte(packets.DisconnectTopicAliasInvalid), disconnectErr.Packet.ReasonCode)
+	assert.Equal(t, byte(packets.DisconnectProtocolError), disconnectErr.Packet.ReasonCode)
 }
 
 func TestTopicAliasInvalidDisconnectsBeforeHandlers(t *testing.T) {
