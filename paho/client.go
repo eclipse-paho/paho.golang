@@ -41,13 +41,20 @@ var (
 	ErrInvalidArguments = errors.New("invalid argument") // If included (errors.Join) in an error, there is a problem with the arguments passed. Retrying on the same connection with the same arguments will not succeed.
 )
 
+// disconnector - If a handler (currently supported by OnPublishReceived) returns a disconnector, the client will
+// disconnect with the supplied packet.
+type disconnector interface {
+	Error() string
+	Disconnect() *Disconnect
+}
+
 type (
 	PublishReceived struct {
 		Packet *Publish
 		Client *Client // The Client that received the message (note that the connection may have been lost post-receipt)
 
 		AlreadyHandled bool    // Set to true if a previous callback has returned true (indicating some action has already been taken re the message)
-		Errs           []error // Errors returned by previous handlers (if any).
+		Errs           []error // non-nil errors returned by previous handlers.
 	}
 
 	// ClientConfig are the user-configurable options for the client, an
@@ -78,7 +85,11 @@ type (
 		// OnPublishReceived provides a slice of callbacks; additional handlers may be added after the client has been
 		// created via the AddOnPublishReceived function (Client holds a copy of the slice; OnPublishReceived will not change).
 		// When a `PUBLISH` is received, the callbacks will be called in order. If a callback processes the message,
-		// then it should return true. This boolean, and any errors, will be passed to subsequent handlers.
+		// then it should return true. This boolean, and any errors, will be passed to later handlers.
+		// Topic aliases are not resolved automatically for these callbacks; add `topicaliases.NewTopicAliasHandler()`
+		// at the point in the slice where later callbacks should begin seeing resolved topics.
+		// Returning an error that implements Disconnect() *Disconnect stops dispatch and closes the connection using
+		// the returned DISCONNECT packet.
 		OnPublishReceived []func(PublishReceived) (bool, error)
 
 		PacketTimeout time.Duration
@@ -108,7 +119,7 @@ type (
 	Client struct {
 		config ClientConfig
 
-		// OnPublishReceived copy of OnPublishReceived from ClientConfig (perhaps with added callback form Router)
+		// onPublishReceived copy of OnPublishReceived from ClientConfig (perhaps with added callbacks from Router)
 		onPublishReceived        []func(PublishReceived) (bool, error)
 		onPublishReceivedTracker []int // Used to track positions in above
 		onPublishReceivedMu      sync.Mutex
@@ -138,7 +149,7 @@ type (
 	CommsProperties struct {
 		MaximumPacketSize    uint32
 		ReceiveMaximum       uint16
-		TopicAliasMaximum    uint16
+		TopicAliasMaximum    uint16 // Note: If you set this, consider using `topicaliases.NewTopicAliasHandler()`
 		MaximumQoS           byte
 		RetainAvailable      bool
 		WildcardSubAvailable bool
@@ -192,10 +203,14 @@ func NewClient(conf ClientConfig) *Client {
 	}
 	if c.config.Router != nil {
 		r := c.config.Router
+		aliasHandler := newTopicAliasHandler()
 		c.onPublishReceived = append(c.onPublishReceived,
 			func(p PublishReceived) (bool, error) {
-				r.Route(p.Packet.Packet())
-				return false, nil
+				_, err := aliasHandler(p)
+				if err == nil {
+					r.Route(p.Packet.Packet())
+				}
+				return false, err
 			})
 	}
 	c.onPublishReceivedTracker = make([]int, len(c.onPublishReceived)) // Must have the same number of elements as onPublishReceived
@@ -465,13 +480,36 @@ func (c *Client) routePublishPackets() {
 			if ha {
 				handled = true
 			}
-			errs = append(errs, err)
+			if err != nil {
+				// Handler may encounter an error which requires us to drop the connection
+				if disconnectErr, ok := errors.AsType[disconnector](err); ok {
+					c.disconnectFromHandler(disconnectErr)
+					return
+				}
+				errs = append(errs, err)
+			}
 		}
 
 		if !c.config.EnableManualAcknowledgment {
 			c.ack(pb)
 		}
 	}
+}
+
+// disconnectFromHandler runs Disconnect asynchronously so routePublishPackets can
+// return before Disconnect waits for the client workers to stop.
+func (c *Client) disconnectFromHandler(disconnectErr disconnector) {
+	d := disconnectErr.Disconnect()
+	if d == nil {
+		d = &Disconnect{ReasonCode: packets.DisconnectUnspecifiedError}
+	}
+	go func() {
+		var reportedErr error = disconnectErr
+		if err := c.Disconnect(d); err != nil {
+			reportedErr = errors.Join(disconnectErr, fmt.Errorf("sending handler-requested disconnect: %w", err))
+		}
+		c.config.OnClientError(reportedErr)
+	}()
 }
 
 // incoming is the Client function that reads and handles incoming
@@ -1065,6 +1103,12 @@ idLoop:
 // ClientID retrieves the client ID from the config (sometimes used in handlers that require the ID)
 func (c *Client) ClientID() string {
 	return c.config.ClientID
+}
+
+// ClientProps returns client properties.
+// Must only be called after Connect has returned (as this is where client properties are written)
+func (c *Client) ClientProps() CommsProperties {
+	return c.clientProps
 }
 
 // SetDebugLogger takes an instance of the paho Logger interface
