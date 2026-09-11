@@ -17,6 +17,8 @@ Ensure you have a valid, signed
 The author email address on your Git commits must match an email
 address associated with your Eclipse Foundation account.
 
+Please do not raise a PR if you are not prepared to sign the ECA (we will be unable to accept it).
+
 ## Related issue
 
 <!--
