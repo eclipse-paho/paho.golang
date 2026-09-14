@@ -109,6 +109,64 @@ func TestClientConnect(t *testing.T) {
 	assert.Equal(t, uint8(0), ca.ReasonCode)
 }
 
+func TestClientConnectRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		reasonCode byte
+		properties *packets.Properties
+		wantError  string
+	}{
+		{
+			name:       "without properties",
+			reasonCode: 0x87,
+			wantError:  "failed to connect to server (reason code: 0x87)",
+		},
+		{
+			name:       "redirect without reason string",
+			reasonCode: 0x9C,
+			properties: &packets.Properties{ServerReference: "other.example:1883"},
+			wantError:  "failed to connect to server (reason code: 0x9C)",
+		},
+		{
+			name:       "redirect with reason string",
+			reasonCode: 0x9D,
+			properties: &packets.Properties{
+				ServerReference: "other.example:1883",
+				ReasonString:    "server moved",
+			},
+			wantError: "failed to connect to server (reason code: 0x9D): server moved",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := basictestserver.New(paholog.NewTestLogger(t, "TestServer:"))
+			ts.SetResponse(packets.CONNACK, &packets.Connack{
+				ReasonCode: tc.reasonCode,
+				Properties: tc.properties,
+			})
+			go ts.Run()
+			defer ts.Stop()
+
+			c := NewClient(ClientConfig{Conn: ts.ClientConn()})
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			ca, err := c.Connect(ctx, &Connect{ClientID: "testClient", CleanStart: true})
+			require.EqualError(t, err, tc.wantError)
+			require.NotNil(t, ca)
+			assert.Equal(t, tc.reasonCode, ca.ReasonCode)
+			if tc.properties != nil {
+				require.NotNil(t, ca.Properties)
+				assert.Equal(t, tc.properties.ServerReference, ca.Properties.ServerReference)
+				assert.Equal(t, tc.properties.ReasonString, ca.Properties.ReasonString)
+			}
+			select {
+			case <-c.Done():
+			default:
+				t.Error("rejected connection should be closed")
+			}
+		})
+	}
+}
+
 func TestClientSubscribe(t *testing.T) {
 	clientLogger := paholog.NewTestLogger(t, "ClientSubscribe:")
 	ts := basictestserver.New(paholog.NewTestLogger(t, "TestServer:"))

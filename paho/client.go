@@ -325,7 +325,10 @@ func (c *Client) Connect(ctx context.Context, cp *Connect) (*Connack, error) {
 			reason = ca.Properties.ReasonString
 		}
 		cleanup()
-		return ca, fmt.Errorf("failed to connect to server: %s", reason)
+		if reason != "" {
+			return ca, fmt.Errorf("failed to connect to server (reason code: 0x%02X): %s", ca.ReasonCode, reason)
+		}
+		return ca, fmt.Errorf("failed to connect to server (reason code: 0x%02X)", ca.ReasonCode)
 	}
 
 	if err := c.config.Session.ConAckReceived(c.config.Conn, ccp, caPacket); err != nil {

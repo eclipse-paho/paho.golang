@@ -89,9 +89,10 @@ func (d *DisconnectError) Error() string {
 
 // ConnackError will be passed when the server denies connection in CONNACK packet
 type ConnackError struct {
-	ReasonCode byte   // CONNACK reason code
-	Reason     string // CONNACK Reason string from properties
-	Err        error  // underlying error
+	ReasonCode byte          // CONNACK reason code
+	Reason     string        // CONNACK Reason string from properties
+	Err        error         // underlying error
+	Connack    *paho.Connack // complete CONNACK received from the server, including its properties
 }
 
 // NewConnackError returns a new ConnackError
@@ -104,6 +105,7 @@ func NewConnackError(err error, connack *paho.Connack) *ConnackError {
 		ReasonCode: connack.ReasonCode,
 		Reason:     reason,
 		Err:        err,
+		Connack:    connack,
 	}
 }
 
