@@ -17,6 +17,7 @@ package paho
 
 import (
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/eclipse/paho.golang/packets"
@@ -126,4 +127,21 @@ func Test_routeDefault(t *testing.T) {
 		t.Errorf("no router should have been called r1: %d, r2: %d", r1Count, r2Count)
 	}
 
+}
+
+// Test_routeAliasRace exercises concurrent calls to a shared router with aliases.
+// Run with -race to detect a recurrence of issue #331, where alias registrations
+// modified router state while holding only a read lock.
+func Test_routeAliasRace(t *testing.T) {
+	r := NewStandardRouter()
+	alias := uint16(1)
+	var wg sync.WaitGroup
+
+	for range 2 {
+		wg.Go(func() {
+			r.Route(&packets.Publish{Topic: "test", Properties: &packets.Properties{TopicAlias: &alias}})
+			r.Route(&packets.Publish{Properties: &packets.Properties{TopicAlias: &alias}})
+		})
+	}
+	wg.Wait()
 }

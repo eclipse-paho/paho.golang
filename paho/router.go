@@ -39,6 +39,7 @@ type MessageHandler func(*Publish)
 // MessageHandlers for
 // Route() takes a Publish message and determines which MessageHandlers
 // should be invoked
+// Note: Topic Aliases should be resolved before `Route` is called
 type Router interface {
 	RegisterHandler(string, MessageHandler)
 	UnregisterHandler(string)
@@ -52,7 +53,6 @@ type StandardRouter struct {
 	sync.RWMutex
 	defaultHandler MessageHandler
 	subscriptions  map[string][]MessageHandler
-	aliases        map[uint16]string
 	debug          log.Logger
 }
 
@@ -60,7 +60,6 @@ type StandardRouter struct {
 func NewStandardRouter() *StandardRouter {
 	return &StandardRouter{
 		subscriptions: make(map[string][]MessageHandler),
-		aliases:       make(map[uint16]string),
 		debug:         log.NOOPLogger{},
 	}
 }
@@ -103,25 +102,9 @@ func (r *StandardRouter) Route(pb *packets.Publish) {
 
 	m := PublishFromPacketPublish(pb)
 
-	var topic string
-	if pb.Properties.TopicAlias != nil {
-		r.debug.Println("message is using topic aliasing")
-		if pb.Topic != "" {
-			// Register new alias
-			r.debug.Printf("registering new topic alias '%d' for topic '%s'", *pb.Properties.TopicAlias, m.Topic)
-			r.aliases[*pb.Properties.TopicAlias] = pb.Topic
-		}
-		if t, ok := r.aliases[*pb.Properties.TopicAlias]; ok {
-			r.debug.Printf("aliased topic '%d' translates to '%s'", *pb.Properties.TopicAlias, m.Topic)
-			topic = t
-		}
-	} else {
-		topic = m.Topic
-	}
-
 	handlerCalled := false
 	for route, handlers := range r.subscriptions {
-		if match(route, topic) {
+		if match(route, m.Topic) {
 			r.debug.Println("found handler for:", route)
 			for _, handler := range handlers {
 				handler(m)
