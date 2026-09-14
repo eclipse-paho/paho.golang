@@ -101,6 +101,69 @@ func TestFileQueue(t *testing.T) {
 	}
 }
 
+// TestFileQueueOrderWithCoarseModTime is a regression test for
+// https://github.com/eclipse-paho/paho.golang/issues/342 - some platforms/filesystems only update a file's
+// ModTime with a coarse resolution, so files written in rapid succession can end up sharing an identical
+// ModTime. If that happens ordering must still be correct, so this test enqueues a batch of entries with no
+// delay between them (unlike TestFileQueue, which sleeps between each Enqueue) and confirms Peek/Remove still
+// returns them in the order they were enqueued.
+func TestFileQueueOrderWithCoarseModTime(t *testing.T) {
+	q, err := New(t.TempDir(), "queueOrderTest-", ".que")
+	if err != nil {
+		t.Fatalf("failed to create queue: %s", err)
+	}
+
+	const entryFormat = "Queue entry %d for ordering test"
+	const count = 50
+	for i := 0; i < count; i++ {
+		if err := q.Enqueue(bytes.NewReader([]byte(fmt.Sprintf(entryFormat, i)))); err != nil {
+			t.Fatalf("error adding entry %d: %s", i, err)
+		}
+	}
+
+	for i := 0; i < count; i++ {
+		entry, err := q.Peek()
+		if err != nil {
+			t.Fatalf("error peeking entry %d: %s", i, err)
+		}
+		r, err := entry.Reader()
+		if err != nil {
+			t.Fatalf("error getting reader for entry %d: %s", i, err)
+		}
+		buf := &bytes.Buffer{}
+		if _, err = buf.ReadFrom(r); err != nil {
+			t.Fatalf("error reading entry %d: %s", i, err)
+		}
+		if err = entry.Remove(); err != nil {
+			t.Fatalf("error removing queue entry %d: %s", i, err)
+		}
+
+		expected := []byte(fmt.Sprintf(entryFormat, i))
+		if bytes.Compare(expected, buf.Bytes()) != 0 {
+			t.Fatalf("expected \"%s\", got \"%s\"", expected, buf.Bytes())
+		}
+	}
+
+	if _, err := q.Peek(); !errors.Is(err, queue.ErrEmpty) {
+		t.Errorf("expected ErrEmpty, got %s", err)
+	}
+}
+
+// TestNextOrderTimeMonotonic confirms that nextOrderTime always returns strictly increasing values, even when
+// called in a tight loop (i.e. faster than time.Now() itself may change) - this is what guarantees queue
+// ordering is correct regardless of the OS/filesystem's ModTime resolution.
+func TestNextOrderTimeMonotonic(t *testing.T) {
+	q := &Queue{}
+	prev := q.nextOrderTime()
+	for i := 0; i < 10000; i++ {
+		next := q.nextOrderTime()
+		if !next.After(prev) {
+			t.Fatalf("nextOrderTime did not increase: prev=%s, next=%s", prev, next)
+		}
+		prev = next
+	}
+}
+
 // TestLeaveAndError checks that the Leave and Error functions do what is expected
 func TestLeaveAndError(t *testing.T) {
 	testDirectory := t.TempDir()
