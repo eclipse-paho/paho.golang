@@ -42,23 +42,23 @@ func NewConstantBackoff(delay time.Duration) Backoff {
 // implementation for an exponential backoff
 ////////////////////////////////////////////////////////////////////////////////
 
-// NewExponentialBackoff provides a random duration within a range starting
-// from a fixed min value up to a "moving" max value that increases
-// exponentially for each attempt up to the specified max value.
+// NewExponentialBackoff returns a backoff which provides a random duration
+// within a range starting from a fixed min value up to a "moving" max value
+// that increases exponentially for each attempt up to the specified max value.
 //
 // The "moving" max is computed by multiplying the initial max value with the
-// factor for each attemt up the specified max value.
+// factor for each attempt up to the specified max value.
 //
 // Configuration parameters:
-//   - minDelay        - lower bound for computed backoff
-//   - maxDelay        - upper bound for computed backoff
-//   - initialMaxDelay - initial max value which wiil incerease exponentially up to the max delay
-//   - factor          - factor for the exponential increase of initial max delay
+//   - minDelay        - absolute lower bound for computed backoff
+//   - maxDelay        - absolute upper bound for computed backoff
+//   - initialMaxDelay - initial upper bound before exponential growth
+//   - factor          - multiplier applied to the upper bound on each attempt
 func NewExponentialBackoff(
-	minDelay time.Duration, // lower bound for computed backoff
-	maxDelay time.Duration, // upper bound for computed backoff
-	initialMaxDelay time.Duration, // initial max value which wiil incerease exponentially up to the max delay
-	factor float32, // factor for the exponential increase of initial max delay
+	minDelay time.Duration, // absolute lower bound for computed backoff
+	maxDelay time.Duration, // absolute upper bound for computed backoff
+	initialMaxDelay time.Duration, // initial upper bound before exponential growth
+	factor float32, // multiplier applied to the upper bound on each attempt
 ) Backoff {
 	if minDelay <= 0 {
 		panic("min delay must NOT be less than or equal to: 0")
@@ -73,27 +73,29 @@ func NewExponentialBackoff(
 		panic("factor must NOT be less than or equal to: 1")
 	}
 
-	// for simplicity using numbers instead of duration internally
+	// use millisecond values internally to simplify the calculations
 	minDelayMillis := minDelay.Milliseconds()
 	maxDelayMillis := maxDelay.Milliseconds()
 	initialMaxDelayMillis := initialMaxDelay.Milliseconds()
 
-	// computes the "moving" max value based on the given attempt by multiplying
-	// it with the factor and ensures it does not exceed the specified max value
+	// Calculates the "moving" attempt-specific upper bound.
+	//
+	// Upper bound starts at initialMaxDelay and is multiplied by factor
+	// for each additional attempt, up to maxDelay.
 	computeMaxDelayForAttempt := func(attempt int) int64 {
 
-		// only "moving part",
-		// will be multiplied by "factor" up to the max value for each attempt
+		// This is the exponentially growing upper bound, the only "moving part"
+		// Will be multiplied by "factor" up to the absolute upper bound for each attempt
 		movingMaxMillis := initialMaxDelayMillis
 
-		// computaion is based on 1 as 0 is the backoff for the first attempt
+		// computation is based on 1 as 0 is the backoff for the first attempt
 		for i := 1; i < attempt; i++ {
 			movingMaxMillis = int64(float32(movingMaxMillis) * factor)
 			// ensure we stay in range
 			// check for range overflow / numerical overflow
 			if maxDelayMillis < movingMaxMillis || movingMaxMillis < minDelayMillis {
 				movingMaxMillis = maxDelayMillis
-				// stop as we reached max value already
+				// stop as we reached the absolute upper bound already
 				break
 			}
 		}
