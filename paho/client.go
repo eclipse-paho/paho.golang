@@ -847,6 +847,9 @@ func (c *Client) Unsubscribe(ctx context.Context, u *Unsubscribe) (*Unsuback, er
 // Publish is used to send a publication to the MQTT server.
 // It is passed a pre-prepared Publish packet and blocks waiting for the appropriate response, or for the timeout to fire.
 // A PublishResponse is returned, which is relevant for QOS1+. For QOS0, a default success response is returned.
+// If the server rejects the PUBLISH with a PUBACK or PUBREC reason code >= 0x80, both the response and an error are returned.
+// A PUBCOMP reason code of 0x92 (Packet Identifier not found) is returned in the response without an error, as it can
+// occur during recovery of a completed QoS2 exchange. It does not necessarily mean that the publication failed.
 // Note that a message may still be delivered even if Publish times out (once the message is part of the session state,
 // it may even be delivered following an application restart).
 // Warning: Publish may outlive the connection when QOS1+ (managed in `session_state`)
@@ -870,6 +873,8 @@ type PublishOptions struct {
 // PublishWithOptions is used to send a publication to the MQTT server (with options to customise its behaviour)
 // It is passed a pre-prepared Publish packet and, by default, blocks waiting for the appropriate response, or for the
 // timeout to fire. A PublishResponse is returned, which is relevant for QOS1+. For QOS0, a default success response is returned.
+// In blocking mode, responses and errors are returned as described by Publish. PublishMethod_AsyncSend returns before
+// the acknowledgement is received and does not report server rejections.
 // Note that a message may still be delivered even if Publish times out (once the message is part of the session state,
 // it may even be delivered following an application restart).
 // Warning: Publish may outlive the connection when QOS1+ (managed in `session_state`)
@@ -965,12 +970,20 @@ func (c *Client) publishQoS12(ctx context.Context, pb *packets.Publish, o Publis
 	case 2:
 		switch resp.Type {
 		case packets.PUBCOMP:
+			// MQTT 5.0 section 3.7.2.1 states that the valid Reason Codes are 0x00 or 0x92. 0x92 "is not an error
+			// during recovery" so we don't treat it as an error here. We do preserve the Reason Code so callers can
+			// diagnose a possible session state mismatch.
 			pr := PublishResponseFromPubcomp(resp.Content.(*packets.Pubcomp))
 			return pr, nil
 		case packets.PUBREC:
-			c.debug.Printf("received PUBREC for %s (must have errored)", pb.PacketID)
-			pr := PublishResponseFromPubrec(resp.Content.(*packets.Pubrec))
-			return pr, nil
+			// The SessionManager contract only permits a rejection PUBREC as the final response.
+			pubrec := resp.Content.(*packets.Pubrec)
+			pr := PublishResponseFromPubrec(pubrec)
+			c.debug.Printf("received final PUBREC for %d (reason code: 0x%02X)", pb.PacketID, pr.ReasonCode)
+			return pr, fmt.Errorf(
+				"QoS 2 publish ended at PUBREC (reason code: 0x%02X): %s",
+				pubrec.ReasonCode, pubrec.Reason(),
+			)
 		default:
 			return nil, fmt.Errorf("received %d instead of PUBCOMP", resp.Type)
 		}

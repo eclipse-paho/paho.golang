@@ -321,6 +321,73 @@ func TestClientPublishQoS2(t *testing.T) {
 	assert.Equal(t, uint8(0), pr.ReasonCode)
 }
 
+func TestClientPublishResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		qos        byte
+		puback     byte
+		pubrec     byte
+		pubcomp    byte
+		wantReason byte
+		wantError  bool
+	}{
+		{name: "QoS1 success", qos: 1},
+		{name: "QoS1 not authorized", qos: 1, puback: packets.PubackNotAuthorized, wantReason: packets.PubackNotAuthorized, wantError: true},
+		{name: "QoS2 success", qos: 2},
+		{name: "QoS2 no matching subscribers", qos: 2, pubrec: packets.PubrecNoMatchingSubscribers},
+		{name: "QoS2 packet identifier not found", qos: 2, pubcomp: packets.PubcompPacketIdentifierNotFound, wantReason: packets.PubcompPacketIdentifierNotFound},
+		{name: "QoS2 unspecified error", qos: 2, pubrec: packets.PubrecUnspecifiedError, wantReason: packets.PubrecUnspecifiedError, wantError: true},
+		{name: "QoS2 implementation specific error", qos: 2, pubrec: packets.PubrecImplementationSpecificError, wantReason: packets.PubrecImplementationSpecificError, wantError: true},
+		{name: "QoS2 not authorized", qos: 2, pubrec: packets.PubrecNotAuthorized, wantReason: packets.PubrecNotAuthorized, wantError: true},
+		{name: "QoS2 topic name invalid", qos: 2, pubrec: packets.PubrecTopicNameInvalid, wantReason: packets.PubrecTopicNameInvalid, wantError: true},
+		{name: "QoS2 packet identifier in use", qos: 2, pubrec: packets.PubrecPacketIdentifierInUse, wantReason: packets.PubrecPacketIdentifierInUse, wantError: true},
+		{name: "QoS2 quota exceeded", qos: 2, pubrec: packets.PubrecQuotaExceeded, wantReason: packets.PubrecQuotaExceeded, wantError: true},
+		{name: "QoS2 payload format invalid", qos: 2, pubrec: packets.PubrecPayloadFormatInvalid, wantReason: packets.PubrecPayloadFormatInvalid, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, withProperties := range []bool{false, true} {
+				t.Run(fmt.Sprintf("properties=%t", withProperties), func(t *testing.T) {
+					props := &packets.Properties{}
+					if withProperties {
+						props.ReasonString = "broker diagnostic"
+						props.User = []packets.User{{Key: "detail", Value: "publish response"}}
+					}
+					ts := basictestserver.New(paholog.NewTestLogger(t, "TestServer:"))
+					ts.SetResponse(packets.CONNACK, &packets.Connack{Properties: &packets.Properties{}})
+					ts.SetResponse(packets.PUBACK, &packets.Puback{ReasonCode: tc.puback, Properties: props})
+					ts.SetResponse(packets.PUBREC, &packets.Pubrec{ReasonCode: tc.pubrec, Properties: props})
+					ts.SetResponse(packets.PUBCOMP, &packets.Pubcomp{ReasonCode: tc.pubcomp, Properties: props})
+					go ts.Run()
+					defer ts.Stop()
+
+					c := NewClient(ClientConfig{Conn: ts.ClientConn()})
+					defer c.close()
+					ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+					defer cancel()
+					_, err := c.Connect(ctx, &Connect{ClientID: "publish-responses", CleanStart: true})
+					require.NoError(t, err)
+
+					pr, err := c.Publish(ctx, &Publish{QoS: tc.qos, Topic: "test/responses", Payload: []byte("test payload")})
+					if tc.wantError {
+						if tc.qos == 2 {
+							require.ErrorContains(t, err, fmt.Sprintf("QoS 2 publish ended at PUBREC (reason code: 0x%02X):", tc.pubrec))
+						} else {
+							require.ErrorContains(t, err, "error publishing:")
+						}
+					} else {
+						require.NoError(t, err)
+					}
+					require.NotNil(t, pr)
+					assert.Equal(t, tc.wantReason, pr.ReasonCode)
+					require.NotNil(t, pr.Properties)
+					assert.Equal(t, props.ReasonString, pr.Properties.ReasonString)
+					assert.Equal(t, UserPropertiesFromPacketUser(props.User), pr.Properties.User)
+				})
+			}
+		})
+	}
+}
+
 func TestClientReceiveQoS0(t *testing.T) {
 	clientLogger := paholog.NewTestLogger(t, "TestClientReceiveQoS0:")
 

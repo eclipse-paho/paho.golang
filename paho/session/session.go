@@ -57,12 +57,16 @@ type SessionManager interface {
 	//   - If a `PUBLISH` then a slot has been allocated (function will block if RECEIVE MAXIMUM messages are inflight)
 	//   - Publish messages will have been written to the store (and will be automatically transmitted if a new connection
 	//     is established before the message is fully acknowledged - subject to state rules in the MQTTv5 spec)
-	//   - Something will be sent to `resp` when either the message is fully acknowledged or the packet is removed from
-	//     the session (in which case the zero value will be sent).
+	//   - The returned channel will receive the final acknowledgement when the transaction completes (including
+	//     rejection), or a zero-value ControlPacket if the transaction is removed without a final acknowledgement.
 	//
 	// If the function returns an error, then any actions taken will be rewound prior to return.
 	// On success it returns a state-owned channel that receives exactly one response and is then closed.
 	// On error it returns a nil channel.
+	// For a QoS 1 PUBLISH, the final acknowledgement is PUBACK. For a QoS 2 PUBLISH, it is PUBCOMP or a PUBREC with
+	// ReasonCode >= 0x80 indicating rejection. A successful PUBREC (ReasonCode < 0x80) MUST NOT be sent to this channel:
+	// the session manager must handle the PUBREL/PUBCOMP exchange and wait for PUBCOMP before reporting completion.
+	// For SUBSCRIBE and UNSUBSCRIBE, the final acknowledgements are SUBACK and UNSUBACK respectively.
 	AddToSession(ctx context.Context, packet Packet) (<-chan packets.ControlPacket, error)
 
 	// PacketReceived must be called when any packet with a packet identifier is received. It will make any required
