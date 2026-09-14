@@ -83,7 +83,15 @@ type (
 		// Set Connect.Properties.TopicAliasMaximum to allow the server to use inbound aliases.
 		OnPublishReceived []func(PublishReceived) (bool, error)
 
+		// PacketTimeout defaults to 10 seconds when zero. It limits waiting for the connection handshake,
+		// SUBACK, UNSUBACK, and QoS 1/2 publish acknowledgments. A shorter caller context deadline takes precedence.
+		// For QoS 1/2 publishes, the budget starts before session admission and includes waiting for send quota;
+		// async publishing skips the acknowledgment wait. SUBACK/UNSUBACK timers start after the packet is written.
+		// These context timeouts do not interrupt blocked network writes.
+		// PacketTimeout does not apply to QoS 0 publishes, explicit Authenticate calls, or keepalive checks.
+		// Note: Issue #356 raised to discuss changes to this.
 		PacketTimeout time.Duration
+
 		// OnServerDisconnect is called only when a packets.DISCONNECT is received from server
 		OnServerDisconnect func(*Disconnect)
 		// OnClientError is for example called on net.Error. Note that this may be called multiple times and may be
@@ -536,8 +544,11 @@ func (c *Client) incoming(ctx context.Context) {
 				if err := aliases.resolve(pb, c.clientProps.TopicAliasMaximum); err != nil {
 					// Disconnect waits for incoming to finish, so let it run separately.
 					go func() {
+						// PacketTimeout seems the most appropriate timeout for disconnect.
+						ctx, cancel := context.WithTimeout(ctx, c.config.PacketTimeout)
+						defer cancel()
 						var reportedErr error = err
-						if sendErr := c.Disconnect(err.Disconnect()); sendErr != nil {
+						if sendErr := c.disconnect(ctx, err.Disconnect()); sendErr != nil {
 							reportedErr = errors.Join(err, fmt.Errorf("sending topic alias disconnect: %w", sendErr))
 						}
 						c.config.OnClientError(reportedErr)
@@ -1031,13 +1042,24 @@ func (c *Client) expectConnack(packet chan<- *packets.Connack, errs chan<- error
 
 }
 
-// Disconnect is used to send a Disconnect packet to the MQTT server
-// Whether or not the attempt to send the Disconnect packet fails
-// (and if it does this function returns any error) the network connection
-// is closed.
+// Disconnect closes the connection after attempting to send a DISCONNECT packet.
+// It waits for the client to shut down before returning any write error.
 func (c *Client) Disconnect(d *Disconnect) error {
+	return c.disconnect(context.Background(), d)
+}
+
+// disconnect closes the connection after attempting to send a DISCONNECT packet.
+// If ctx is canceled, the connection will be closed (aborting the write).
+// Always awaits client shutdown before returning.
+func (c *Client) disconnect(ctx context.Context, d *Disconnect) error {
 	c.debug.Println("disconnecting", d)
+
+	// Ensure the client will close if the write blocks
+	stop := context.AfterFunc(ctx, c.cancelFunc)
 	_, err := d.Packet().WriteTo(c.config.Conn)
+	if !stop() {
+		err = errors.Join(ctx.Err(), err)
+	}
 
 	c.close()
 
