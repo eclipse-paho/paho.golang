@@ -365,8 +365,17 @@ func (c *Client) Connect(ctx context.Context, cp *Connect) (*Connack, error) {
 		c.serverProps.SharedSubAvailable = ca.Properties.SharedSubAvailable
 	}
 
+	// Count every worker in before starting any of them: once incoming (or the ping handler) is running, the
+	// connection may drop and shutdown may already be waiting on c.workers, and a WaitGroup must not be
+	// incremented from zero concurrently with Wait.
+	workers := 3
+	if c.config.EnableManualAcknowledgment {
+		c.acksTracker.reset()
+		workers++
+	}
+	c.workers.Add(workers)
+
 	c.debug.Println("received CONNACK, starting PingHandler")
-	c.workers.Add(1)
 	go func() {
 		defer c.workers.Done()
 		defer c.debug.Println("returning from ping handler worker")
@@ -376,7 +385,6 @@ func (c *Client) Connect(ctx context.Context, cp *Connect) (*Connack, error) {
 	}()
 
 	c.debug.Println("starting publish packets loop")
-	c.workers.Add(1)
 	go func() {
 		defer c.workers.Done()
 		defer c.debug.Println("returning from publish packets loop worker")
@@ -386,7 +394,6 @@ func (c *Client) Connect(ctx context.Context, cp *Connect) (*Connack, error) {
 	}()
 
 	c.debug.Println("starting incoming")
-	c.workers.Add(1)
 	go func() {
 		defer c.workers.Done()
 		defer c.debug.Println("returning from incoming worker")
@@ -396,13 +403,11 @@ func (c *Client) Connect(ctx context.Context, cp *Connect) (*Connack, error) {
 	if c.config.EnableManualAcknowledgment {
 		c.debug.Println("starting acking routine")
 
-		c.acksTracker.reset()
 		sendAcksInterval := defaultSendAckInterval
 		if c.config.SendAcksInterval > 0 {
 			sendAcksInterval = c.config.SendAcksInterval
 		}
 
-		c.workers.Add(1)
 		go func() {
 			defer c.workers.Done()
 			defer c.debug.Println("returning from ack tracker routine")

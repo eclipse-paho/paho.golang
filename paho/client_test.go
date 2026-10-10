@@ -1448,3 +1448,48 @@ func basicClientInitialisation(ctx context.Context, c *Client) context.Context {
 	context.AfterFunc(ctx, func() { c.shutdown(done) })
 	return ctx
 }
+
+// TestConnectServerClosesAfterConnack checks that a connection the server closes immediately after a successful
+// CONNACK shuts the client down cleanly when manual acknowledgement is enabled. Connect used to count the ack worker
+// into c.workers only after incoming had started, so shutdown's Wait could overlap an Add from zero (a data race,
+// and occasionally a "WaitGroup is reused" panic); run with -race. See issue #359.
+func TestConnectServerClosesAfterConnack(t *testing.T) {
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 250; i++ {
+				serverConn, clientConn := net.Pipe()
+				go func() {
+					defer serverConn.Close()
+					if _, err := packets.ReadPacket(serverConn); err != nil { // CONNECT
+						return
+					}
+					ca := packets.NewControlPacket(packets.CONNACK)
+					ca.Content.(*packets.Connack).ReasonCode = packets.ConnackSuccess
+					_, _ = ca.WriteTo(serverConn)
+				}()
+
+				c := NewClient(ClientConfig{
+					Conn:                       clientConn,
+					EnableManualAcknowledgment: true,
+					OnClientError:              func(error) {},
+				})
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_, err := c.Connect(ctx, &Connect{ClientID: "testClient", KeepAlive: 30, CleanStart: true})
+				cancel()
+				if err != nil {
+					continue // the close won the race with the CONNACK
+				}
+				select {
+				case <-c.Done():
+				case <-time.After(5 * time.Second):
+					assert.Fail(t, "client did not shut down after the server closed the connection")
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
