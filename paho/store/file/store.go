@@ -212,7 +212,7 @@ func (s *Store) list() ([]uint16, error) {
 	sort.Slice(ids, func(i, j int) bool {
 		return ids[i].modTime.Before(ids[j].modTime)
 	})
-	ret := make([]uint16, len(entries))
+	ret := make([]uint16, len(ids))
 	for i := range ids {
 		ret[i] = ids[i].id
 	}
