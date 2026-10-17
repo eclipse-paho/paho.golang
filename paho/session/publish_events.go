@@ -92,8 +92,8 @@ type PublishEventHandler struct {
 	BeforeSend func(PublishSend)
 	// PreparePubrel runs on the first successful PUBREC, before persisting PUBREL and before OnEvent. Repeated or
 	// rejection PUBRECs do not invoke it.
-	// Note that if the source cannot be read from the session store then this callback is skipped and the transaction
-	//  is aborted; OnEvent, if set, receives the error.
+	// If the source cannot be read from the session store, this callback is skipped and processing of the PUBREC
+	// stops. The stored PUBLISH remains in the session store; OnEvent, if set, receives the error.
 	// This hook works independently of OnEvent.
 	PreparePubrel func(PubrelPreparation)
 	// OnEvent observes acknowledgements and session loss. All packets are read-only. Notifications may be missed or
