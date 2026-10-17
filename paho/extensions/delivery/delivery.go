@@ -147,7 +147,7 @@ func (t *Tracker) TrackWithID(p *paho.Publish, id string) error {
 // Handler returns callbacks for ClientConfig.PublishEvents.
 func (t *Tracker) Handler() session.PublishEventHandler {
 	return session.PublishEventHandler{
-		ReadStoredPacket: true,
+		ReadStoredPacket: session.ReadStoredHeader,
 		BeforeSend:       t.beforeSend,
 		PreparePubrel:    t.preparePubrel,
 		OnEvent:          t.onEvent,

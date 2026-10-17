@@ -192,6 +192,75 @@ func TestStoreProblemsDoNotDetermineDelivery(t *testing.T) {
 	assert.Len(t, results, 1, "bulk failure cannot be assigned to an application ID")
 }
 
+// TestMissingSourceErrors ensures source failures are reported without guessing a delivery outcome.
+func TestMissingSourceErrors(t *testing.T) {
+	readErr := errors.New("source read failed")
+	var problems []delivery.Problem
+	handler := delivery.New(delivery.Config{
+		OnResult: func(delivery.Result) { t.Error("unreadable source must not produce a delivery result") },
+		OnError:  func(p delivery.Problem) { problems = append(problems, p) },
+	}).Handler()
+	for _, kind := range []session.PublishEventType{session.PublishEventComplete, session.PublishEventQueueDiscarded} {
+		eventErr := errors.New("event error")
+		handler.OnEvent(session.PublishEvent{Type: kind, PacketID: 7, Err: errors.Join(readErr, eventErr)})
+		require.NotEmpty(t, problems)
+		problem := problems[len(problems)-1]
+		assert.ErrorIs(t, problem.Err, readErr)
+		assert.ErrorIs(t, problem.Err, eventErr)
+		assert.Empty(t, problem.ID)
+		assert.Equal(t, uint16(7), problem.PacketID)
+		assert.Equal(t, kind, problem.Event)
+	}
+	assert.Len(t, problems, 2)
+}
+
+// TestTrackingUsesHeaders verifies that tracking requests only headers and works without a stored payload,
+// including when preserving the application ID across the PUBLISH-to-PUBREL transition.
+func TestTrackingUsesHeaders(t *testing.T) {
+	for _, qos := range []byte{0, 1, 2} {
+		t.Run(fmt.Sprintf("qos%d", qos), func(t *testing.T) {
+			var results []delivery.Result
+			tracker := delivery.New(delivery.Config{
+				OnResult: func(r delivery.Result) { results = append(results, r) },
+				OnError:  func(p delivery.Problem) { t.Errorf("unexpected tracking error: %v", p.Err) },
+			})
+			handler := tracker.Handler()
+			assert.Equal(t, session.ReadStoredHeader, handler.ReadStoredPacket)
+			packet := publication(t, tracker, qos, "headers")
+			publish := packet.Content.(*packets.Publish)
+			if qos > 0 {
+				publish.PacketID = 7
+			}
+			header := *publish
+			header.Payload = nil
+			source := header.ToControlPacket()
+			outgoing := *publish
+			handler.BeforeSend(session.PublishSend{Source: packet, Outgoing: outgoing.ToControlPacket()})
+			assert.Empty(t, outgoing.Properties.User, "tracking ID must be removed from the wire copy")
+			assert.Equal(t, "body", string(outgoing.Payload))
+			assert.Equal(t, "headers", publish.Properties.User[0].Value, "source metadata must be preserved")
+			if qos == 1 {
+				handler.OnEvent(session.PublishEvent{Type: session.PublishEventComplete, PacketID: 7, Source: source,
+					Trigger: acknowledgement(packets.PUBACK, 7, 0)})
+			} else if qos == 2 {
+				rel := packets.NewControlPacket(packets.PUBREL)
+				rel.Content.(*packets.Pubrel).PacketID = 7
+				handler.PreparePubrel(session.PubrelPreparation{Source: &header, Outgoing: rel.Content.(*packets.Pubrel)})
+				handler.OnEvent(session.PublishEvent{Type: session.PublishEventComplete, PacketID: 7, Source: rel,
+					Trigger: acknowledgement(packets.PUBCOMP, 7, 0)})
+			}
+			require.Len(t, results, 1)
+			assert.Equal(t, "headers", results[0].ID)
+			assert.Equal(t, qos, results[0].QoS)
+			if qos == 0 {
+				assert.Equal(t, delivery.SendAttempted, results[0].Outcome)
+			} else {
+				assert.Equal(t, delivery.Acknowledged, results[0].Outcome)
+			}
+		})
+	}
+}
+
 // TestSubmissionAndUntrackedPackets covers errors before enqueue acceptance and
 // confirms ordinary untracked publications and successful PUBREC are ignored.
 func TestSubmissionAndUntrackedPackets(t *testing.T) {

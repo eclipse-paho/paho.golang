@@ -82,8 +82,9 @@ explicitly if other extensions also use them, observing the session callback own
 storage, copies it into PUBREL for QoS 2, and removes it from every wire copy without changing the stored packet. 
 Publications without the property are ignored.
 
-`Handler()` enables `ReadStoredPacket`, opting into the extra store reads required to recover IDs. Do not disable it on 
-the returned handler.
+`Handler()` sets `ReadStoredPacket` to `session.ReadStoredHeader` because tracking only needs header fields and
+properties. Do not change it to `session.ReadStoredNone`. If composing callbacks that also need the payload, use
+`session.ReadStoredFull`.
 
 After an application restart, install the handler before connecting and use the same persistent queue/session stores and 
 client ID with appropriate session expiry and clean-start settings. The new tracker reads IDs from recovered packets; 

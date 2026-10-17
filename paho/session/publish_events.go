@@ -17,6 +17,20 @@ package session
 
 import "github.com/eclipse/paho.golang/packets"
 
+// StoredPacketReadMode selects the source data needed by callbacks for stored publications. Implementations may
+// obtain it from the session store or a cache. It does not control reads required for protocol operations.
+type StoredPacketReadMode uint8
+
+const (
+	// ReadStoredNone disables stored source data for callbacks. This is the default.
+	ReadStoredNone StoredPacketReadMode = iota
+	// ReadStoredHeader provides the fixed and variable headers, including properties. Source may also contain the
+	// payload, but callers must not rely on it. An absent payload does not mean the original publication was empty.
+	ReadStoredHeader
+	// ReadStoredFull provides the complete packet, including any payload.
+	ReadStoredFull
+)
+
 // PublishEventType identifies a stage of an outgoing publication.
 type PublishEventType uint8
 
@@ -40,18 +54,18 @@ const (
 	PublishEventQueueDiscarded
 )
 
-// PublishEvent describes an outgoing publication's progress. Source and Trigger are read-only, and all packet
-// references are only valid during the callback.
+// PublishEvent describes an outgoing publication's progress. Source, Trigger, and their referenced data are read-only
+// and only valid during the callback. Copy any data needed afterwards.
 type PublishEvent struct {
 	Type     PublishEventType
 	PacketID uint16
 	// Trigger is the received acknowledgement, CONNACK, or DISCONNECT responsible for the event. It is nil for session
 	// loss without a packet, PublishEventNotSent, and PublishEventQueueDiscarded.
 	Trigger *packets.ControlPacket
-	// Source is the stored PUBLISH or PUBREL, provided only when ReadStoredPacket is true. It is nil when callback
-	// source reads are disabled or fail. PublishEventNotSent and PublishEventQueueDiscarded always provide the
-	// rejected PUBLISH, regardless of ReadStoredPacket. At PUBCOMP it is a PUBREL, so any application metadata needed
-	// must be copied by PreparePubrel.
+	// Source provides the stored PUBLISH or PUBREL at the detail selected by ReadStoredPacket. It is nil with
+	// ReadStoredNone or when loading fails. PublishEventNotSent and PublishEventQueueDiscarded always provide the
+	// complete rejected PUBLISH, regardless of ReadStoredPacket. At PUBCOMP it is a PUBREL, so any application metadata
+	// needed must be copied by PreparePubrel.
 	Source *packets.ControlPacket
 	// Err reports a local store read, decode, or cleanup error, not a broker rejection (which is available in Trigger).
 	// A failed read at Pubrec prevents replacement of the stored PUBLISH so application metadata is not lost.
@@ -77,13 +91,13 @@ type PublishSend struct {
 	Outgoing *packets.ControlPacket
 }
 
-// PubrelPreparation provides the packets for the first successful PUBREC. Source and Trigger are read-only. Outgoing
-// has fresh, non-nil Properties; the callback may set properties valid for PUBREL (User and ReasonString), but must
-// not change PacketID or ReasonCode. Data copied by reference from Source or Trigger remains read-only: clone slices or
+// PubrelPreparation provides the packets for the transition from PUBLISH to PUBREL. Source and Trigger are read-only.
+// Outgoing has fresh, non-nil Properties; the callback may set properties valid for PUBREL (User and ReasonString), but
+// must not change PacketID or ReasonCode. Data copied by reference from Source or Trigger remains read-only: clone slices or
 // pointed-to values before editing them. Replacement data must not be mutated after the callback returns, as the
 // library still needs it for persistence and transmission. Packet references are valid only during the callback.
 type PubrelPreparation struct {
-	// Source is the stored PUBLISH, or nil when ReadStoredPacket is false.
+	// Source provides the stored PUBLISH at the detail selected by ReadStoredPacket, or nil with ReadStoredNone.
 	Source  *packets.Publish
 	Trigger *packets.Pubrec
 	// Outgoing is the PUBREL to persist before transmission, with non-nil Properties.
@@ -100,8 +114,8 @@ type PublishEventHandler struct {
 	// wire copy.
 	// See PublishSend for permitted changes and ownership of shared data.
 	BeforeSend func(PublishSend)
-	// PreparePubrel runs on the first successful PUBREC, before persisting PUBREL and before OnEvent. Repeated or
-	// rejection PUBRECs do not invoke it.
+	// PreparePubrel runs on a successful PUBREC while the stored packet is still a PUBLISH, before persisting PUBREL
+	// and before OnEvent. Once PUBREL is stored, repeated PUBRECs do not invoke it. Rejection PUBRECs do not invoke it.
 	// If the source cannot be read from the session store, this callback is skipped and processing of the PUBREC
 	// stops. The stored PUBLISH remains in the session store; OnEvent, if set, receives the error.
 	// This hook works independently of OnEvent.
@@ -110,10 +124,13 @@ type PublishEventHandler struct {
 	// read-only. Notifications may be missed or repeated across crashes; applications should use stable IDs and
 	// idempotent handling.
 	OnEvent func(PublishEvent)
-	// ReadStoredPacket enables source reads for PreparePubrel and OnEvent. This adds session-store reads, for example
-	// loading the linked PUBLISH when PUBREC is received. Reads needed to retransmit stored packets, including PUBREL
-	// responses to repeated PUBREC, still occur when this is false; OnEvent receives a nil Source in that case.
-	ReadStoredPacket bool
+	// ReadStoredPacket selects the source data provided to PreparePubrel and OnEvent for stored publications.
+	// The default is ReadStoredNone. ReadStoredHeader and ReadStoredFull may add session-store reads, for example
+	// loading the linked PUBLISH when PUBREC is received. Select ReadStoredFull if a callback needs the payload.
+	// Reads needed to retransmit stored packets, including PUBREL responses to repeated PUBREC, still occur with
+	// ReadStoredNone; callbacks receive a nil Source in that case. Already-decoded sources for BeforeSend,
+	// PublishEventNotSent, and PublishEventQueueDiscarded are always complete, regardless of this setting.
+	ReadStoredPacket StoredPacketReadMode
 }
 
 // PrepareSend applies BeforeSend to a shallow copy of a PUBLISH or PUBREL.

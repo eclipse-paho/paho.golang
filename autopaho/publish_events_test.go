@@ -93,7 +93,7 @@ func TestQueuedPublishEventsRestored(t *testing.T) {
 	}
 	completed := make(chan completion, 2)
 	handler := session.PublishEventHandler{
-		ReadStoredPacket: true,
+		ReadStoredPacket: session.ReadStoredFull,
 		BeforeSend: func(e session.PublishSend) {
 			filter := func(u packets.User) bool { return u.Key == "app-id" }
 			switch p := e.Outgoing.Content.(type) {
@@ -206,13 +206,14 @@ func TestQueuedPublishEventsRestored(t *testing.T) {
 func TestQueuedPublishDiscarded(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
-		readSource  bool
+		readSource  session.StoredPacketReadMode
 		failRemove  bool
 		returnEmpty bool
 		noObserver  bool
 	}{
 		{name: "source reads disabled"},
-		{name: "source reads enabled", readSource: true},
+		{name: "header source", readSource: session.ReadStoredHeader},
+		{name: "full source", readSource: session.ReadStoredFull},
 		{name: "removal retried", failRemove: true},
 		{name: "removal returns ErrEmpty", returnEmpty: true},
 		{name: "no observer", noObserver: true},
@@ -224,7 +225,9 @@ func TestQueuedPublishDiscarded(t *testing.T) {
 			handler := session.PublishEventHandler{
 				ReadStoredPacket: tc.readSource,
 				BeforeSend:       func(session.PublishSend) { t.Error("rejected publication must not be sent") },
-				PreparePubrel:    func(session.PubrelPreparation) { t.Error("rejected publication must not enter session") },
+				PreparePubrel: func(session.PubrelPreparation) {
+					t.Error("rejected publication must not enter session")
+				},
 			}
 			if !tc.noObserver {
 				handler.OnEvent = func(e session.PublishEvent) {

@@ -898,12 +898,12 @@ func (s *State) tidy() []clientGenerated {
 	return removed
 }
 
-// publishEventLocked creates a PublishEvent for packetID. If ReadStoredPacket is enabled, it loads the stored packet
-// into Source, recording any error in Err.
+// publishEventLocked creates a PublishEvent for packetID. When requested, it loads the stored packet into Source,
+// recording any error in Err. Header mode currently uses the full decoder; callers must not rely on the payload.
 // The caller must hold s.mu.
 func (s *State) publishEventLocked(handler session.PublishEventHandler, kind session.PublishEventType, id uint16, trigger *packets.ControlPacket) session.PublishEvent {
 	e := session.PublishEvent{Type: kind, PacketID: id, Trigger: trigger}
-	if !handler.ReadStoredPacket {
+	if handler.ReadStoredPacket == session.ReadStoredNone {
 		return e
 	}
 	r, err := s.clientStore.Get(id)
@@ -1002,19 +1002,21 @@ func (s *State) pubrecReceived(recv *packets.ControlPacket) error {
 		sourceHandler := handler
 		if cg.packetType == packets.PUBREL {
 			// Repeated PUBREC resends the persisted PUBREL, including its properties. This means the stored packet is
-			// needed (used below in `outgoing = event.Source`)
-			sourceHandler.ReadStoredPacket = true
+			// needed for the outgoing response below.
+			sourceHandler.ReadStoredPacket = session.ReadStoredFull
 		}
 		event := s.publishEventLocked(sourceHandler, session.PublishEventPubrec, rp.PacketID, recv)
-		if event.Source != nil && event.Source.Type != cg.packetType {
-			event.Err = fmt.Errorf("stored packet type %d differs from transaction type %d", event.Source.Type, cg.packetType)
-			event.Source = nil
+		if event.Source != nil {
+			source := event.Source
+			if source.Type != cg.packetType {
+				event.Err = fmt.Errorf("stored packet type %d differs from transaction type %d", source.Type, cg.packetType)
+				event.Source = nil
+			} else if cg.packetType == packets.PUBREL {
+				outgoing = source
+			}
 		}
-		if cg.packetType == packets.PUBREL && event.Source != nil {
-			outgoing = event.Source
-		}
-		if !handler.ReadStoredPacket {
-			event.Source = nil // We may have read the source above despite ReadStoredPacket being false.
+		if handler.ReadStoredPacket == session.ReadStoredNone {
+			event.Source = nil // Retransmission may require a store read even when callbacks opt out.
 		}
 		s.mu.Unlock()
 		if prepare && event.Err == nil {

@@ -128,7 +128,7 @@ func TestPublishEventsContinueAfterPublishCancellation(t *testing.T) {
 	sent := make(chan uint16, 1)
 	completed := make(chan uint16, 1)
 	c := NewClient(ClientConfig{Conn: ts.ClientConn(), PublishEvents: session.PublishEventHandler{
-		ReadStoredPacket: true,
+		ReadStoredPacket: session.ReadStoredFull,
 		BeforeSend: func(e session.PublishSend) {
 			sent <- e.Source.PacketID()
 			cancel()
@@ -174,8 +174,8 @@ func (s *publishEventReadCountingStore) Get(id uint16) (io.ReadCloser, error) {
 // should occur, even if ReadStoredPacket is enabled on the new client.
 func TestPublishEventsDisabledOnReusedSession(t *testing.T) {
 	for _, present := range []bool{false, true} {
-		for _, readStored := range []bool{false, true} {
-			t.Run(fmt.Sprintf("sessionPresent=%t/readStored=%t", present, readStored), func(t *testing.T) {
+		for _, readStored := range []session.StoredPacketReadMode{session.ReadStoredNone, session.ReadStoredHeader, session.ReadStoredFull} {
+			t.Run(fmt.Sprintf("sessionPresent=%t/readStored=%d", present, readStored), func(t *testing.T) {
 				store := &publishEventReadCountingStore{Store: memory.New()}
 				s := state.New(store, memory.New())
 				t.Cleanup(func() { _ = s.Close() })
@@ -200,10 +200,12 @@ func TestPublishEventsDisabledOnReusedSession(t *testing.T) {
 					return c
 				}
 				first := connect(session.PublishEventHandler{
-					ReadStoredPacket: true,
+					ReadStoredPacket: session.ReadStoredFull,
 					OnEvent:          func(session.PublishEvent) { callbacks.Add(1) },
 					BeforeSend:       func(session.PublishSend) { callbacks.Add(1) },
-					PreparePubrel:    func(session.PubrelPreparation) { callbacks.Add(1) },
+					PreparePubrel: func(session.PubrelPreparation) {
+						callbacks.Add(1)
+					},
 				}, false)
 				_, err := first.Publish(t.Context(), &Publish{QoS: 1, Topic: "events"})
 				require.NoError(t, err)
@@ -256,7 +258,7 @@ func TestPublishEventsOnSessionWrapper(t *testing.T) {
 	c := NewClient(ClientConfig{
 		Conn: ts.ClientConn(), Session: &eventSessionWrapper{s},
 		PublishEvents: session.PublishEventHandler{
-			ReadStoredPacket: true,
+			ReadStoredPacket: session.ReadStoredFull,
 			BeforeSend:       func(session.PublishSend) { sent.Add(1) },
 			PreparePubrel: func(e session.PubrelPreparation) {
 				assert.NotNil(t, e.Source)

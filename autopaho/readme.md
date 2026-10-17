@@ -166,12 +166,17 @@ publications. This was added to provide a way to track message delivery but may 
 | Callback | Behaviour |
 | --- | --- |
 | `BeforeSend` | Before each PUBLISH/PUBREL write, including QoS 0 and retransmissions. Allows changes to the packet that is to be transmitted. |
-| `PreparePubrel` | On the first successful PUBREC, before storing PUBREL. Allows properties to be copied from PUBLISH into PUBREL. |
+| `PreparePubrel` | On the first successful PUBREC, before storing PUBREL. Allows properties to be copied into PUBREL. |
 | `OnEvent` | Reports acknowledgements, session loss, and local rejection of queued publications through the notifications below. |
 
-`ReadStoredPacket` is false by default. Enable it to load stored source packets
-for `PreparePubrel` and `OnEvent`; `BeforeSend` always has its source available.
-`PublishEventQueueDiscarded` also always includes its source, using the already decoded queue entry.
+`ReadStoredPacket` alows the user to select the data needed by `PreparePubrel` and `OnEvent` for stored publications:
+
+| Mode | Source data |
+| --- | --- |
+| `session.ReadStoredNone` (0, default) | No stored source; `Source` is nil. |
+| `session.ReadStoredHeader` (1) | Fixed and variable headers, including properties. The payload may also be present, but callbacks must not rely on it. |
+| `session.ReadStoredFull` (2) | Complete packet, including the payload. |
+
 
 | Notification | Trigger | Meaning |
 | --- | --- | --- |

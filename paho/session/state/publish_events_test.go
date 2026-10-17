@@ -148,7 +148,7 @@ func TestUnknownPubrecBeforeSend(t *testing.T) {
 	defer s.Close()
 	sent := 0
 	s.SetPublishEventHandler(session.PublishEventHandler{
-		ReadStoredPacket: true,
+		ReadStoredPacket: session.ReadStoredFull,
 		BeforeSend: func(e session.PublishSend) {
 			assertEventUnlocked(t, s)
 			sent++
@@ -160,8 +160,10 @@ func TestUnknownPubrecBeforeSend(t *testing.T) {
 			outgoing.Properties = &packets.Properties{User: []packets.User{{Key: "wire", Value: "unknown"}}}
 			assert.Nil(t, source.Properties, "wire edits must leave the source unchanged")
 		},
-		PreparePubrel: func(session.PubrelPreparation) { t.Error("unknown PUBREC must not prepare a stored PUBREL") },
-		OnEvent:       func(session.PublishEvent) { t.Error("unknown PUBREC must not report a publication event") },
+		PreparePubrel: func(session.PubrelPreparation) {
+			t.Error("unknown PUBREC must not prepare a stored PUBREL")
+		},
+		OnEvent: func(session.PublishEvent) { t.Error("unknown PUBREC must not report a publication event") },
 	})
 	var wire bytes.Buffer
 	eventConnect(t, s, &wire, false)
@@ -190,8 +192,8 @@ func TestUnknownPubrecBeforeSend(t *testing.T) {
 func TestPublishEventOptionalReads(t *testing.T) {
 	for _, qos := range []byte{1, 2} {
 		for _, enabled := range []bool{false, true} {
-			for _, load := range []bool{false, true} {
-				t.Run(fmt.Sprintf("qos%d/handler=%t/read=%t", qos, enabled, load), func(t *testing.T) {
+			for _, load := range []session.StoredPacketReadMode{session.ReadStoredNone, session.ReadStoredHeader, session.ReadStoredFull} {
+				t.Run(fmt.Sprintf("qos%d/handler=%t/read=%d", qos, enabled, load), func(t *testing.T) {
 					store := &eventTestStore{storer: memory.New()}
 					s := New(store, memory.New())
 					defer s.Close()
@@ -201,7 +203,18 @@ func TestPublishEventOptionalReads(t *testing.T) {
 						handler.OnEvent = func(e session.PublishEvent) {
 							assertEventUnlocked(t, s)
 							kinds = append(kinds, e.Type)
-							assert.Equal(t, load, e.Source != nil)
+							assert.Equal(t, load != session.ReadStoredNone, e.Source != nil)
+							if e.Source != nil {
+								assert.Equal(t, e.PacketID, e.Source.PacketID())
+								if pub, ok := e.Source.Content.(*packets.Publish); ok {
+									assert.Equal(t, qos, pub.QoS)
+									assert.Equal(t, "events/test", pub.Topic)
+									assert.Contains(t, pub.Properties.User, packets.User{Key: "app-id", Value: "order/42"})
+									if load == session.ReadStoredFull {
+										assert.Equal(t, "payload", string(pub.Payload))
+									}
+								}
+							}
 							assert.NotNil(t, e.Trigger)
 							assert.NoError(t, e.Err)
 						}
@@ -229,7 +242,7 @@ func TestPublishEventOptionalReads(t *testing.T) {
 					if qos == 2 {
 						wantReads = 1 // Repeated PUBREC must resend the stored PUBREL.
 					}
-					if enabled && load {
+					if enabled && load != session.ReadStoredNone {
 						wantReads = 1
 						if qos == 2 {
 							wantReads = 3
@@ -261,7 +274,7 @@ func TestPublishEventsSurviveRestart(t *testing.T) {
 			s := New(store, memory.New())
 			var completed []string
 			var losses int
-			handler := session.PublishEventHandler{ReadStoredPacket: true}
+			handler := session.PublishEventHandler{ReadStoredPacket: session.ReadStoredFull}
 			handler.BeforeSend = func(e session.PublishSend) {
 				assertEventUnlocked(t, s)
 				switch p := e.Outgoing.Content.(type) {
@@ -374,7 +387,7 @@ func TestPublishEventCompletionTriggers(t *testing.T) {
 			}
 			trigger := eventAck(tc.kind, pub.PacketID, tc.reason)
 			count := 0
-			s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: true, OnEvent: func(e session.PublishEvent) {
+			s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: session.ReadStoredFull, OnEvent: func(e session.PublishEvent) {
 				assertEventUnlocked(t, s)
 				count++
 				assert.Equal(t, session.PublishEventComplete, e.Type)
@@ -397,7 +410,7 @@ func TestPublishEventCompletionTriggers(t *testing.T) {
 // TestPublishEventSessionLostBeforeLoadingState verifies that a missing broker session reports and removes persisted
 // publications before they have been loaded into memory, with source reads remaining optional.
 func TestPublishEventSessionLostBeforeLoadingState(t *testing.T) {
-	for _, load := range []bool{false, true} {
+	for _, load := range []session.StoredPacketReadMode{session.ReadStoredNone, session.ReadStoredHeader, session.ReadStoredFull} {
 		t.Run(fmt.Sprint(load), func(t *testing.T) {
 			store := &eventTestStore{storer: memory.New()}
 			pub := eventPublish(1)
@@ -413,13 +426,13 @@ func TestPublishEventSessionLostBeforeLoadingState(t *testing.T) {
 				assert.Equal(t, session.PublishEventSessionLost, e.Type)
 				assert.Equal(t, byte(packets.CONNACK), e.Trigger.Type)
 				assert.NoError(t, e.Err)
-				assert.Equal(t, load, e.Source != nil)
+				assert.Equal(t, load != session.ReadStoredNone, e.Source != nil)
 				ids = append(ids, e.PacketID)
 			}})
 			eventConnect(t, s, io.Discard, false)
 			assert.Equal(t, []uint16{7, 9}, ids)
 			wantReads := 0
-			if load {
+			if load != session.ReadStoredNone {
 				wantReads = 2
 			}
 			assert.Equal(t, wantReads, store.gets)
@@ -460,7 +473,7 @@ func TestPublishEventSessionLostStreamsStoredPackets(t *testing.T) {
 			}
 			seen := make(map[uint16]bool)
 			maxReadAhead := 0
-			s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: true, OnEvent: func(e session.PublishEvent) {
+			s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: session.ReadStoredFull, OnEvent: func(e session.PublishEvent) {
 				assertEventUnlocked(t, s)
 				locked := disk.TryLock()
 				assert.True(t, locked, "callback must run outside the store mutex")
@@ -533,7 +546,7 @@ func TestPublishEventSessionLostSerializesStoreCleanup(t *testing.T) {
 				}
 				entered, resume := make(chan struct{}), make(chan struct{})
 				var ids []uint16
-				s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: true, OnEvent: func(e session.PublishEvent) {
+				s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: session.ReadStoredFull, OnEvent: func(e session.PublishEvent) {
 					assertEventUnlocked(t, s)
 					assert.Equal(t, session.PublishEventSessionLost, e.Type)
 					assert.NoError(t, e.Err)
@@ -595,7 +608,7 @@ func TestPublishEventSessionLostContinuesAfterReadFailure(t *testing.T) {
 	require.NoError(t, err)
 	store.corrupt = true
 	var ids []uint16
-	s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: true, OnEvent: func(e session.PublishEvent) {
+	s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: session.ReadStoredFull, OnEvent: func(e session.PublishEvent) {
 		ids = append(ids, e.PacketID)
 		if e.PacketID == first.PacketID {
 			assert.Error(t, e.Err)
@@ -625,7 +638,7 @@ func TestPublishEventSessionLostReportsKnownIDsAfterListFailure(t *testing.T) {
 	require.NoError(t, err)
 	store.fail = true
 	var ids []uint16
-	s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: true, OnEvent: func(e session.PublishEvent) {
+	s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: session.ReadStoredFull, OnEvent: func(e session.PublishEvent) {
 		ids = append(ids, e.PacketID)
 		if e.PacketID == 0 {
 			assert.ErrorContains(t, e.Err, "listing discarded publications")
@@ -646,7 +659,7 @@ func TestPublishEventSessionLostReportsKnownIDsAfterListFailure(t *testing.T) {
 // from discarded publications and that cleanup retries neither retransmit those publications nor repeat their
 // notifications.
 func TestPublishEventSessionLostReportsResetFailureSeparately(t *testing.T) {
-	for _, load := range []bool{false, true} {
+	for _, load := range []session.StoredPacketReadMode{session.ReadStoredNone, session.ReadStoredHeader, session.ReadStoredFull} {
 		t.Run(fmt.Sprint(load), func(t *testing.T) {
 			store := &resetFailStore{Store: memory.New()}
 			s := New(store, memory.New())
@@ -666,7 +679,7 @@ func TestPublishEventSessionLostReportsResetFailureSeparately(t *testing.T) {
 					assert.Nil(t, e.Source)
 				} else {
 					assert.NoError(t, e.Err)
-					assert.Equal(t, load, e.Source != nil)
+					assert.Equal(t, load != session.ReadStoredNone, e.Source != nil)
 				}
 			}})
 			require.ErrorContains(t, s.ConnectionLost(nil), "failed to reset client store")
@@ -693,7 +706,7 @@ func TestPublishEventSessionExpiresOnDisconnect(t *testing.T) {
 	_, err := s.AddToSession(context.Background(), pub)
 	require.NoError(t, err)
 	var count int
-	s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: true, OnEvent: func(e session.PublishEvent) {
+	s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: session.ReadStoredFull, OnEvent: func(e session.PublishEvent) {
 		assertEventUnlocked(t, s)
 		count++
 		assert.Equal(t, session.PublishEventSessionLost, e.Type)
@@ -728,7 +741,7 @@ func TestPublishEventReadFailure(t *testing.T) {
 					store.readErr = errors.New("store unavailable")
 				}
 				count := 0
-				s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: true, OnEvent: func(e session.PublishEvent) {
+				s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: session.ReadStoredFull, OnEvent: func(e session.PublishEvent) {
 					count++
 					assert.Error(t, e.Err)
 					assert.Nil(t, e.Source)
@@ -766,11 +779,13 @@ func TestPublishEventTransitionDoesNotRestoreDiscardedSession(t *testing.T) {
 			_, err := s.AddToSession(t.Context(), pub)
 			require.NoError(t, err)
 			entered, resume := make(chan struct{}), make(chan struct{})
-			handler := session.PublishEventHandler{ReadStoredPacket: true}
+			handler := session.PublishEventHandler{ReadStoredPacket: session.ReadStoredFull}
 			// pause lets the test discard the session while its PUBREC callback is running.
 			pause := func() { close(entered); <-resume }
 			if prepare {
-				handler.PreparePubrel = func(session.PubrelPreparation) { pause() }
+				handler.PreparePubrel = func(session.PubrelPreparation) {
+					pause()
+				}
 			} else {
 				handler.OnEvent = func(e session.PublishEvent) {
 					if e.Type == session.PublishEventPubrec {
@@ -800,6 +815,58 @@ func TestPublishEventTransitionDoesNotRestoreDiscardedSession(t *testing.T) {
 	}
 }
 
+// TestPublishEventSourceSurvivesPacketIDReuse checks that a callback can repeatedly read the original publication
+// after its stored packet has been deleted and its MQTT identifier has been assigned to another publication.
+func TestPublishEventSourceSurvivesPacketIDReuse(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := &eventTestStore{storer: memory.New()}
+		s := New(store, memory.New())
+		defer s.Close()
+		eventConnect(t, s, io.Discard, false)
+		pub := eventPublish(1)
+		_, err := s.AddToSession(t.Context(), pub)
+		require.NoError(t, err)
+		entered, resume := make(chan struct{}), make(chan struct{})
+		s.SetPublishEventHandler(session.PublishEventHandler{
+			ReadStoredPacket: session.ReadStoredFull,
+			OnEvent: func(e session.PublishEvent) {
+				require.Equal(t, session.PublishEventComplete, e.Type)
+				require.NoError(t, e.Err)
+				first := e.Source
+				require.NotNil(t, first)
+				assert.Equal(t, pub.PacketID, first.PacketID())
+				assert.Equal(t, "order/42", eventUsers(first)[0].Value)
+				close(entered)
+				<-resume
+				again := e.Source
+				assert.Equal(t, "order/42", eventUsers(again)[0].Value)
+				assert.Equal(t, "payload", string(again.Content.(*packets.Publish).Payload))
+				assert.Same(t, first, again)
+				assert.Equal(t, pub.PacketID, again.PacketID())
+			},
+		})
+		done := make(chan error, 1)
+		go func() { done <- s.PacketReceived(eventAck(packets.PUBACK, pub.PacketID, 0), nil) }()
+		<-entered
+		ids, err := store.List()
+		require.NoError(t, err)
+		assert.Empty(t, ids, "completion deletes the stored packet before the callback")
+		s.mu.Lock()
+		s.lastMid = pub.PacketID - 1 // Force reuse without allocating the entire identifier range.
+		s.mu.Unlock()
+		next := eventPublish(1)
+		next.Properties.User[0].Value = "order/43"
+		next.Payload = []byte("next payload")
+		_, err = s.AddToSession(t.Context(), next)
+		require.NoError(t, err)
+		require.Equal(t, pub.PacketID, next.PacketID)
+		assert.Equal(t, "order/43", eventUsers(eventRead(t, store.storer, next.PacketID))[0].Value)
+		close(resume)
+		require.NoError(t, <-done)
+		assert.Equal(t, 1, store.gets, "the source is decoded before notification")
+	})
+}
+
 // TestPublishEventPubrelStoreFailure verifies that a failed PUBREL write preserves the stored PUBLISH and prevents
 // PUBREL transmission.
 func TestPublishEventPubrelStoreFailure(t *testing.T) {
@@ -811,7 +878,7 @@ func TestPublishEventPubrelStoreFailure(t *testing.T) {
 	pub := eventPublish(2)
 	_, err := s.AddToSession(t.Context(), pub)
 	require.NoError(t, err)
-	s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: true, PreparePubrel: func(e session.PubrelPreparation) {
+	s.SetPublishEventHandler(session.PublishEventHandler{ReadStoredPacket: session.ReadStoredFull, PreparePubrel: func(e session.PubrelPreparation) {
 		e.Outgoing.Properties.User = slices.Clone(e.Source.Properties.User)
 	}})
 	store.putErr = errors.New("disk full")
@@ -825,14 +892,13 @@ func TestPublishEventPubrelStoreFailure(t *testing.T) {
 func TestPublishCallbacksIndependent(t *testing.T) {
 	for _, prepare := range []bool{false, true} {
 		for _, observe := range []bool{false, true} {
-			for _, read := range []bool{false, true} {
-				t.Run(fmt.Sprintf("prepare=%t/observe=%t/read=%t", prepare, observe, read), func(t *testing.T) {
+			for _, read := range []session.StoredPacketReadMode{session.ReadStoredNone, session.ReadStoredHeader, session.ReadStoredFull} {
+				t.Run(fmt.Sprintf("prepare=%t/observe=%t/read=%d", prepare, observe, read), func(t *testing.T) {
 					store := &eventTestStore{storer: memory.New()}
 					s := New(store, memory.New())
 					defer s.Close()
 					eventConnect(t, s, io.Discard, false)
 					prepared, sent, observed := 0, 0, 0
-					var preparedSource *packets.Publish
 					handler := session.PublishEventHandler{
 						ReadStoredPacket: read,
 						BeforeSend: func(e session.PublishSend) {
@@ -845,9 +911,8 @@ func TestPublishCallbacksIndependent(t *testing.T) {
 						handler.PreparePubrel = func(e session.PubrelPreparation) {
 							assertEventUnlocked(t, s)
 							prepared++
-							assert.Equal(t, read, e.Source != nil)
+							assert.Equal(t, read != session.ReadStoredNone, e.Source != nil)
 							assert.Equal(t, e.Trigger.PacketID, e.Outgoing.PacketID)
-							preparedSource = e.Source
 							if e.Source != nil {
 								e.Outgoing.Properties.User = slices.Clone(e.Source.Properties.User)
 							}
@@ -858,11 +923,11 @@ func TestPublishCallbacksIndependent(t *testing.T) {
 							assertEventUnlocked(t, s)
 							observed++
 							assert.NoError(t, e.Err)
-							assert.Equal(t, read, e.Source != nil)
+							assert.Equal(t, read != session.ReadStoredNone, e.Source != nil)
 							if observed == 1 && prepare {
 								assert.Equal(t, 1, prepared, "preparation precedes notification")
-								if read {
-									assert.Same(t, preparedSource, e.Source.Content, "both callbacks share one read")
+								if read != session.ReadStoredNone {
+									assert.Equal(t, byte(packets.PUBLISH), e.Source.Type)
 								}
 							}
 						}
@@ -876,20 +941,20 @@ func TestPublishCallbacksIndependent(t *testing.T) {
 					require.NoError(t, s.PacketReceived(rec, nil))
 					assert.Equal(t, 2, sent)
 					assert.Equal(t, 2, store.puts, "repeat PUBREC must preserve the stored PUBREL")
-					if prepare && read {
+					if prepare && read != session.ReadStoredNone {
 						assert.Equal(t, pub.Properties.User, eventUsers(eventRead(t, store.storer, pub.PacketID)))
 					}
 					require.NoError(t, s.PacketReceived(eventAck(packets.PUBCOMP, pub.PacketID, 0), nil))
 					wantPrepared, wantObserved, wantReads := 0, 0, 1 // Repeated PUBREC reads the stored PUBREL.
 					if prepare {
 						wantPrepared = 1
-						if read {
+						if read != session.ReadStoredNone {
 							wantReads++
 						}
 					}
 					if observe {
 						wantObserved = 3
-						if read {
+						if read != session.ReadStoredNone {
 							wantReads = 3
 						}
 					}
@@ -912,8 +977,10 @@ func TestPreparePubrelSkippedOnReadFailureOrRejection(t *testing.T) {
 			defer s.Close()
 			eventConnect(t, s, io.Discard, false)
 			s.SetPublishEventHandler(session.PublishEventHandler{
-				ReadStoredPacket: true,
-				PreparePubrel:    func(session.PubrelPreparation) { t.Error("must not prepare PUBREL") },
+				ReadStoredPacket: session.ReadStoredFull,
+				PreparePubrel: func(session.PubrelPreparation) {
+					t.Error("must not prepare PUBREL")
+				},
 			})
 			pub := eventPublish(2)
 			response, err := s.AddToSession(t.Context(), pub)
@@ -948,8 +1015,10 @@ func TestPublishSendCopiesOnlyForBeforeSend(t *testing.T) {
 	} {
 		t.Run(source.PacketType(), func(t *testing.T) {
 			handler := session.PublishEventHandler{
-				OnEvent:       func(session.PublishEvent) { t.Error("send must not notify OnEvent") },
-				PreparePubrel: func(session.PubrelPreparation) { t.Error("send must not prepare PUBREL") },
+				OnEvent: func(session.PublishEvent) { t.Error("send must not notify OnEvent") },
+				PreparePubrel: func(session.PubrelPreparation) {
+					t.Error("send must not prepare PUBREL")
+				},
 			}
 			assert.Same(t, source, handler.PrepareSend(source), "no wire copy without BeforeSend")
 			handler.BeforeSend = func(e session.PublishSend) {
@@ -1078,8 +1147,8 @@ func TestPublishSendReplaceTopicAndProperties(t *testing.T) {
 // TestPubrelPropertiesPersistAndAllowWireReplacement verifies that repeated PUBRECs preserve prepared PUBREL properties
 // before and after state recreation, independently of callback source reads and without an OnEvent observer.
 func TestPubrelPropertiesPersistAndAllowWireReplacement(t *testing.T) {
-	for _, read := range []bool{false, true} {
-		t.Run(fmt.Sprintf("read=%t", read), func(t *testing.T) {
+	for _, read := range []session.StoredPacketReadMode{session.ReadStoredNone, session.ReadStoredHeader, session.ReadStoredFull} {
+		t.Run(fmt.Sprintf("read=%d", read), func(t *testing.T) {
 			store := &eventTestStore{storer: memory.New()}
 			s := New(store, memory.New())
 			defer func() { _ = s.Close() }()
@@ -1089,7 +1158,7 @@ func TestPubrelPropertiesPersistAndAllowWireReplacement(t *testing.T) {
 				PreparePubrel: func(e session.PubrelPreparation) {
 					assertEventUnlocked(t, s)
 					prepared++
-					assert.Equal(t, read, e.Source != nil)
+					assert.Equal(t, read != session.ReadStoredNone, e.Source != nil)
 					e.Outgoing.Properties = &packets.Properties{
 						ReasonString: "stored reason",
 						User:         []packets.User{{Key: "app-id", Value: "pubrel metadata"}},
