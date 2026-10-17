@@ -158,3 +158,25 @@ transmitted when possible. By default, this queue is held in memory but you can 
 
 See `examples/queue`.
 
+## Outgoing publish events
+
+`paho.ClientConfig.PublishEvents` provides callbacks that allow you to track (and edit) packets relating to outgoing 
+publications. This was added to provide a way to track message delivery but may be useful 
+
+| Callback | Behaviour |
+| --- | --- |
+| `BeforeSend` | Before each PUBLISH/PUBREL write, including QoS 0 and retransmissions. Allows changes to the packet that is to be transmitted. |
+| `PreparePubrel` | On the first successful PUBREC, before storing PUBREL. Allows properties to be copied from PUBLISH into PUBREL. |
+| `OnEvent` | Reports acknowledgements and session loss through the notifications below. |
+
+`ReadStoredPacket` is false by default. Enable it to load stored source packets
+for `PreparePubrel` and `OnEvent`; `BeforeSend` always has its source available.
+
+| Notification | Trigger | Meaning |
+| --- | --- | --- |
+| `session.PublishEventPubrec` | Successful PUBREC, including repeats | Progress in a QoS 2 exchange. |
+| `session.PublishEventComplete` | PUBACK, rejection PUBREC, or PUBCOMP | The transaction completed; inspect the reason code to determine the outcome. |
+| `session.PublishEventSessionLost` | CONNACK, DISCONNECT, or none | The session was cleared and the publication discarded; delivery is unknown. |
+
+See the [delivery extension](../paho/extensions/delivery/readme.md) for examples,
+application-ID tracking, and detailed guidance on outcomes, errors, and persistence.
