@@ -39,8 +39,8 @@ const PropertyKey = "paho-delivery-id"
 type Outcome uint8
 
 const (
-	// Unknown means the session was lost or PUBCOMP reported an unknown packet ID.
-	// The publication may already have been delivered.
+	// Unknown means delivery cannot be confirmed: the session was lost, PUBCOMP reported an unknown packet ID,
+	// or a queued publication was discarded after local rejection. The publication may already have been delivered.
 	Unknown Outcome = iota
 	// SendAttempted means QoS 0 reached BeforeSend. This occurs before the packet is written so don't rely on it too
 	// much (QOS0 offers no delivery guarantees).
@@ -49,15 +49,15 @@ const (
 	Acknowledged
 	// Rejected means the broker rejected the publication in PUBACK or PUBREC.
 	Rejected
-	// NotSent means the caller reported failure before the publication was accepted
-	// for delivery, for example a failed enqueue operation.
+	// NotSent means the PUBLISH is known not to have been sent to the server or accepted into session state,
+	// for example when the caller reports a failed enqueue operation.
 	NotSent
 )
 
 var (
 	// ErrSessionLost identifies loss of a publication's MQTT session.
 	ErrSessionLost = errors.New("session lost; delivery is unknown")
-	// ErrUnconfirmed identifies a PUBCOMP that cannot establish successful delivery.
+	// ErrUnconfirmed identifies a PUBCOMP or local queue discard that cannot establish successful delivery.
 	ErrUnconfirmed = errors.New("delivery unconfirmed")
 	// ErrRejected identifies a negative PUBACK or PUBREC.
 	ErrRejected = errors.New("publication rejected")
@@ -74,7 +74,7 @@ type Result struct {
 	Trigger      byte // MQTT packet type; zero for a local event without a packet.
 	ReasonCode   byte // Meaningful only when Trigger is nonzero.
 	ReasonString string
-	Err          error // Rejection, unknown delivery, or the caller's NotSent error.
+	Err          error // Rejection, unknown delivery, or the cause of a NotSent outcome.
 }
 
 // Problem provides information about a tracking or store error separately from delivery outcomes.
@@ -195,10 +195,21 @@ func (t *Tracker) preparePubrel(e session.PubrelPreparation) {
 	}
 }
 
-// onEvent reports acknowledgements and session loss through OnResult, and tracking or storage errors through OnError.
+// onEvent reports acknowledgements, session loss, and local rejections through OnResult, and tracking or storage errors
+// through OnError.
 // An event may trigger both callbacks: for example, a successful acknowledgement followed by a store cleanup failure.
 func (t *Tracker) onEvent(e session.PublishEvent) {
 	id, qos := identity(e.Source)
+	if (e.Type == session.PublishEventNotSent || e.Type == session.PublishEventQueueDiscarded) && e.Source != nil {
+		if id != "" {
+			r := Result{ID: id, QoS: qos, Outcome: NotSent, Err: e.Err}
+			if e.Type == session.PublishEventQueueDiscarded {
+				r.Outcome, r.Err = Unknown, errors.Join(ErrUnconfirmed, e.Err)
+			}
+			t.result(r)
+		}
+		return
+	}
 	if e.Err != nil {
 		t.problem(Problem{ID: id, PacketID: e.PacketID, Event: e.Type, Err: e.Err})
 	}

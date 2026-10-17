@@ -39,8 +39,8 @@ Outcomes passed to `OnResult` are:
 | `SendAttempted` | QoS 0 reached `BeforeSend` (prior to network write). Each attempt produces a notification with the same application ID. |
 | `Acknowledged` | QoS 1 received successful PUBACK, or QoS 2 received PUBCOMP `0x00`. |
 | `Rejected` | The broker rejected the message with PUBACK or PUBREC. `Err` wraps `ErrRejected`; inspect `ReasonCode` and `ReasonString`. |
-| `Unknown` | The session was lost (`ErrSessionLost`) or PUBCOMP did not confirm delivery (`ErrUnconfirmed`). |
-| `NotSent` | The caller used `ReportNotSent` to report a failure before the message was accepted for delivery. |
+| `Unknown` | The session was lost (`ErrSessionLost`), PUBCOMP did not confirm delivery, or local validation caused a queued publication to be discarded (`ErrUnconfirmed`). |
+| `NotSent` | The publication is known not to have been sent or accepted into session state, for example when the caller uses `ReportNotSent` for a failed enqueue operation. |
 
 `Trigger` contains the MQTT packet type, or zero when no packet caused the event. `ReasonCode` and `ReasonString` 
 describe that packet. Results contain no borrowed packet references, so the application may retain them.
@@ -61,6 +61,14 @@ unaffected. Ordinary reconnects retaining the session do not end tracking.
 
 `ReportNotSent` is for known failures before delivery was accepted, such as an enqueue failure. Do not feed every 
 `Publish` error into it: timeouts and network errors can occur after the message has entered persistent session state.
+
+If `PublishViaQueue` succeeds but the queue worker later rejects the message with `paho.ErrInvalidArguments` (for example,
+its QoS exceeds the broker's maximum), AutoPaho emits `PublishEventQueueDiscarded` after removing the queue entry.
+The tracker reports `Unknown` through `OnResult`, retaining the queued application ID. `Err` wraps both `ErrUnconfirmed`
+and the validation error; `PacketID` and `Trigger` are zero. The queue has no history of transmission attempts, so an
+earlier attempt (including before an application restart) may already have delivered the publication. This conservative
+outcome also applies to entries rejected on their first attempt. It does not also generate an `OnError` notification.
+Messages retained for retry and network failures after session acceptance do not generate a queue-discard outcome.
 
 Callbacks run synchronously, may overlap, and must return promptly. They must not wait for MQTT operations, disconnect, 
 or reconnect. 

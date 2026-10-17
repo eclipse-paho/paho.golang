@@ -17,6 +17,7 @@ package autopaho
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -24,7 +25,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eclipse/paho.golang/autopaho/queue"
 	filequeue "github.com/eclipse/paho.golang/autopaho/queue/file"
+	memqueue "github.com/eclipse/paho.golang/autopaho/queue/memory"
 	"github.com/eclipse/paho.golang/internal/testserver"
 	"github.com/eclipse/paho.golang/packets"
 	"github.com/eclipse/paho.golang/paho"
@@ -32,6 +35,7 @@ import (
 	"github.com/eclipse/paho.golang/paho/session"
 	"github.com/eclipse/paho.golang/paho/session/state"
 	filestore "github.com/eclipse/paho.golang/paho/store/file"
+	memstore "github.com/eclipse/paho.golang/paho/store/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -196,4 +200,170 @@ func TestQueuedPublishEventsRestored(t *testing.T) {
 	ids, err := clientStore.List()
 	require.NoError(t, err)
 	assert.Empty(t, ids)
+}
+
+// TestQueuedPublishDiscarded checks the generic event contract, including optional source reads and queue removal errors.
+func TestQueuedPublishDiscarded(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		readSource  bool
+		failRemove  bool
+		returnEmpty bool
+		noObserver  bool
+	}{
+		{name: "source reads disabled"},
+		{name: "source reads enabled", readSource: true},
+		{name: "removal retried", failRemove: true},
+		{name: "removal returns ErrEmpty", returnEmpty: true},
+		{name: "no observer", noObserver: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			var notifications, removals int
+			handler := session.PublishEventHandler{
+				ReadStoredPacket: tc.readSource,
+				BeforeSend:       func(session.PublishSend) { t.Error("rejected publication must not be sent") },
+				PreparePubrel:    func(session.PubrelPreparation) { t.Error("rejected publication must not enter session") },
+			}
+			if !tc.noObserver {
+				handler.OnEvent = func(e session.PublishEvent) {
+					notifications++
+					assert.Equal(t, session.PublishEventQueueDiscarded, e.Type)
+					assert.ErrorIs(t, e.Err, paho.ErrInvalidArguments)
+					assert.Zero(t, e.PacketID)
+					assert.Nil(t, e.Trigger)
+					if assert.NotNil(t, e.Source) {
+						assert.Equal(t, byte(packets.PUBLISH), e.Source.Type)
+						pub := e.Source.Content.(*packets.Publish)
+						assert.Equal(t, byte(1), pub.QoS)
+						assert.Equal(t, []byte("body"), pub.Payload)
+						assert.Contains(t, pub.Properties.User, packets.User{Key: "app-id", Value: "rejected"})
+					}
+				}
+			}
+			q := queueWithRemoveCallback{Queue: memqueue.New(), remove: func(e queue.Entry) error {
+				removals++
+				assert.Zero(t, notifications, "retained entries must not report terminal outcomes")
+				if tc.failRemove && removals == 1 {
+					return errors.New("temporary queue removal failure")
+				}
+				require.NoError(t, e.Remove())
+				cancel() // Stop the worker after it handles this successful removal.
+				if tc.returnEmpty {
+					return queue.ErrEmpty
+				}
+				return nil
+			}}
+			s := state.NewInMemory()
+			defer s.Close()
+			cfg := paho.ClientConfig{Session: s, PublishEvents: handler}
+			connUp := make(chan struct{})
+			close(connUp)
+			cm := ConnectionManager{
+				// Local validation happens before a connection or session transaction is needed.
+				cli: paho.NewClient(cfg), cfg: ClientConfig{ClientConfig: cfg}, queue: q,
+				connUp: connUp, connDown: make(chan struct{}),
+				debug: paholog.NOOPLogger{}, errors: paholog.NOOPLogger{},
+			}
+			require.NoError(t, cm.PublishViaQueue(ctx, &QueuePublish{Publish: &paho.Publish{
+				QoS: 1, Payload: []byte("body"), // A missing topic is rejected locally.
+				Properties: &paho.PublishProperties{User: paho.UserProperties{{Key: "app-id", Value: "rejected"}}},
+			}}))
+			require.ErrorIs(t, cm.managePublishQueue(ctx), context.Canceled)
+			wantRemovals := 1
+			if tc.failRemove {
+				wantRemovals++
+			}
+			assert.Equal(t, wantRemovals, removals)
+			if tc.noObserver {
+				assert.Zero(t, notifications)
+			} else {
+				assert.Equal(t, 1, notifications)
+			}
+			_, err := q.Peek()
+			require.ErrorIs(t, err, queue.ErrEmpty)
+		})
+	}
+}
+
+// TestQueuedPublishStoredBeforeWriteFailure verifies that a network error after session acceptance removes the queue
+// entry without reporting a terminal queue outcome. The stored publication remains available for retransmission.
+func TestQueuedPublishStoredBeforeWriteFailure(t *testing.T) {
+	for _, qos := range []byte{1, 2} {
+		t.Run(fmt.Sprintf("qos%d", qos), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			conn, peer := testserver.NewConnPair()
+			defer conn.Close()
+			require.NoError(t, peer.Close()) // Every write fails, after the PUBLISH has been stored.
+			store := memstore.New()
+			s := state.New(store, memstore.New())
+			defer s.Close()
+			var attempts, removals int
+			cfg := paho.ClientConfig{Conn: conn, Session: s, PublishEvents: session.PublishEventHandler{
+				BeforeSend: func(session.PublishSend) { attempts++ },
+				OnEvent:    func(e session.PublishEvent) { t.Errorf("unexpected event after session acceptance: %+v", e) },
+			}}
+			cli := paho.NewClient(cfg)
+			expiry := uint32(600)
+			require.NoError(t, s.ConAckReceived(conn,
+				&packets.Connect{Properties: &packets.Properties{SessionExpiryInterval: &expiry}}, &packets.Connack{}))
+			q := queueWithRemoveCallback{Queue: memqueue.New(), remove: func(e queue.Entry) error {
+				removals++
+				cancel()
+				return e.Remove()
+			}}
+			connUp := make(chan struct{})
+			close(connUp)
+			cm := ConnectionManager{
+				cli: cli, cfg: ClientConfig{ClientConfig: cfg}, queue: q,
+				connUp: connUp, connDown: make(chan struct{}),
+				debug: paholog.NOOPLogger{}, errors: paholog.NOOPLogger{},
+			}
+			require.NoError(t, cm.PublishViaQueue(ctx, &QueuePublish{Publish: &paho.Publish{
+				QoS: qos, Topic: "events/stored", Payload: []byte("body"),
+				Properties: &paho.PublishProperties{User: paho.UserProperties{{Key: "app-id", Value: "stored"}}},
+			}}))
+			require.ErrorIs(t, cm.managePublishQueue(ctx), context.Canceled)
+			assert.Equal(t, 1, attempts)
+			assert.Equal(t, 1, removals)
+			_, err := q.Peek()
+			require.ErrorIs(t, err, queue.ErrEmpty)
+			ids, err := store.List()
+			require.NoError(t, err)
+			require.Len(t, ids, 1)
+			r, err := store.Get(ids[0])
+			require.NoError(t, err)
+			defer r.Close()
+			cp, err := packets.ReadPacket(r)
+			require.NoError(t, err)
+			pub := cp.Content.(*packets.Publish)
+			assert.Equal(t, qos, pub.QoS)
+			assert.NotZero(t, pub.PacketID)
+			assert.Contains(t, pub.Properties.User, packets.User{Key: "app-id", Value: "stored"})
+		})
+	}
+}
+
+type queueWithRemoveCallback struct {
+	queue.Queue
+	remove func(queue.Entry) error
+}
+
+func (q queueWithRemoveCallback) Peek() (queue.Entry, error) {
+	e, err := q.Queue.Peek()
+	if err != nil {
+		return nil, err
+	}
+	return entryWithRemoveCallback{Entry: e, remove: q.remove}, nil
+}
+
+type entryWithRemoveCallback struct {
+	queue.Entry
+	remove func(queue.Entry) error
+}
+
+func (e entryWithRemoveCallback) Remove() error {
+	return e.remove(e.Entry)
 }
