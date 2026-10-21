@@ -26,6 +26,7 @@ import (
 
 	"github.com/eclipse/paho.golang/packets"
 	"github.com/eclipse/paho.golang/paho/session"
+	storefile "github.com/eclipse/paho.golang/paho/store/file"
 	"github.com/eclipse/paho.golang/paho/store/memory"
 )
 
@@ -604,5 +605,43 @@ func TestConAckRetriesServerStoreAfterFailure(t *testing.T) {
 	s.mu.Unlock()
 	if !exists || packetType != packets.PUBREC {
 		t.Fatalf("server session was not reloaded after retry: type=%d exists=%t", packetType, exists)
+	}
+}
+
+// TestConAckWithQuarantinedFileStore covers connection setup and cleanup when both stores share a directory
+// containing a quarantined packet. Such files must not cause permanent session-reset failures (issue #362).
+func TestConAckWithQuarantinedFileStore(t *testing.T) {
+	dir := t.TempDir()
+	clientStore, err := storefile.New(dir, "client_", ".pkt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverStore, err := storefile.New(dir, "server_", ".pkt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publish := &packets.Publish{PacketID: 7, QoS: 1, Topic: "test/quarantined"}
+	if err := clientStore.Put(7, packets.PUBLISH, publish); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientStore.Quarantine(7); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverStore.Put(8, packets.PUBREC, &packets.Pubrec{PacketID: 8}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(clientStore, serverStore)
+	t.Cleanup(func() { _ = s.Close() })
+	for attempt := 0; attempt < 2; attempt++ {
+		var retransmitted bytes.Buffer
+		if err := s.ConAckReceived(&retransmitted, &packets.Connect{}, &packets.Connack{}); err != nil {
+			t.Fatalf("ConAckReceived on connection %d: %v", attempt+1, err)
+		}
+		if retransmitted.Len() != 0 {
+			t.Fatalf("retransmitted %d bytes despite the broker reporting no session", retransmitted.Len())
+		}
+		if err := s.ConnectionLost(nil); err != nil {
+			t.Fatalf("ConnectionLost on connection %d: %v", attempt+1, err)
+		}
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -146,6 +147,55 @@ func TestFileStoreNaming(t *testing.T) {
 		t.Fatalf("quarantine filename suffix not as expected; got %s", entries[0].Name())
 	}
 
+}
+
+// TestFileStoreIgnoresOtherEntries checks that ignored directory entries do not become packet IDs or prevent Reset.
+func TestFileStoreIgnoresOtherEntries(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := New(dir, "client_", ".pkt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ignored := []string{"notes.txt", "client_1.pkt.tmp", "client_2.pkt.CORRUPT", "server_3.pkt"}
+	for _, name := range ignored {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("preserve"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Even a directory whose name matches the store's prefix and extension must be ignored.
+	if err := os.Mkdir(filepath.Join(dir, "client_4.pkt"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := s.List()
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("empty store List returned %v, %v; want no IDs and no error", ids, err)
+	}
+	packet := &packets.Publish{PacketID: 7, QoS: 1, Topic: "test/store"}
+	if err := s.Put(7, packets.PUBLISH, packet); err != nil {
+		t.Fatal(err)
+	}
+	ids, err = s.List()
+	if err != nil || len(ids) != 1 || ids[0] != 7 {
+		t.Fatalf("populated store List returned %v, %v; want [7] and no error", ids, err)
+	}
+	if err := s.Reset(); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	ids, err = s.List()
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("List after Reset returned %v, %v; want no IDs and no error", ids, err)
+	}
+	for _, name := range ignored {
+		contents, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || string(contents) != "preserve" {
+			t.Fatalf("Reset changed ignored file %s: contents=%q, error=%v", name, contents, err)
+		}
+	}
+	if info, err := os.Stat(filepath.Join(dir, "client_4.pkt")); err != nil || !info.IsDir() {
+		t.Fatalf("Reset removed the ignored directory: %v", err)
+	}
 }
 
 // TestFileStoreBig creates a fully populated Store and checks things work
