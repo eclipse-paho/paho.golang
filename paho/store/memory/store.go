@@ -51,7 +51,7 @@ type Store struct {
 	c    int                     // sequence counter used to maintain message order
 }
 
-// Put stores the packet
+// Put stores the packet. If encoding fails, the store is left unchanged.
 func (m *Store) Put(packetID uint16, packetType byte, w io.WriterTo) error {
 	m.Lock()
 	defer m.Unlock()
@@ -59,7 +59,7 @@ func (m *Store) Put(packetID uint16, packetType byte, w io.WriterTo) error {
 
 	_, err := w.WriteTo(&buff)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	m.data[packetID] = memoryPacket{
