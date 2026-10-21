@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/eclipse/paho.golang/packets"
@@ -138,5 +139,31 @@ func TestMemoryStoreBig(t *testing.T) {
 	}
 	if len(rids) != 0 {
 		t.Fatalf("everything should have been deleted")
+	}
+}
+
+// failingWriterTo is an io.WriterTo whose WriteTo always fails, used to
+// exercise the error path when encoding a packet for storage.
+type failingWriterTo struct {
+	err error
+}
+
+func (f failingWriterTo) WriteTo(w io.Writer) (int64, error) {
+	return 0, f.err
+}
+
+// TestMemoryStorePutReturnsErrorWhenWriteToFails verifies that Put returns the
+// error from encoding the packet instead of panicking (issue #364), and that
+// the packet is not stored when encoding fails.
+func TestMemoryStorePutReturnsErrorWhenWriteToFails(t *testing.T) {
+	s := New()
+	wantErr := errors.New("encoding failed")
+
+	if err := s.Put(1, packets.PUBLISH, failingWriterTo{err: wantErr}); !errors.Is(err, wantErr) {
+		t.Fatalf("Put returned %v, want %v", err, wantErr)
+	}
+
+	if _, err := s.Get(1); !errors.Is(err, ErrNotInStore) {
+		t.Fatalf("packet was stored despite an encoding error: %v", err)
 	}
 }

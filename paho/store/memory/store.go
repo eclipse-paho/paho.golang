@@ -59,7 +59,7 @@ func (m *Store) Put(packetID uint16, packetType byte, w io.WriterTo) error {
 
 	_, err := w.WriteTo(&buff)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	m.data[packetID] = memoryPacket{
