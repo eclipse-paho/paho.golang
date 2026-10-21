@@ -19,10 +19,58 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/eclipse/paho.golang/packets"
 )
+
+type failingWriterTo struct {
+	err error
+}
+
+func (w failingWriterTo) WriteTo(dst io.Writer) (int64, error) {
+	n, err := dst.Write([]byte("partial packet"))
+	if err != nil {
+		return int64(n), err
+	}
+	return int64(n), w.err
+}
+
+// A failed write must return its error without inserting or replacing stored data.
+func TestMemoryStorePutError(t *testing.T) {
+	s := New()
+	for _, id := range []uint16{1, 2} {
+		if err := s.Put(id, packets.PUBLISH, bytes.NewBufferString("original packet")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantErr := errors.New("encoding failed")
+	for _, id := range []uint16{1, 3} {
+		if err := s.Put(id, packets.PUBLISH, failingWriterTo{err: wantErr}); !errors.Is(err, wantErr) {
+			t.Fatalf("Put(%d) returned %v; want %v", id, err, wantErr)
+		}
+	}
+	ids, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != 1 || ids[1] != 2 {
+		t.Fatalf("failed Put changed stored IDs or order: %v", ids)
+	}
+	stored, err := s.Get(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stored.Close()
+	data, err := io.ReadAll(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "original packet" {
+		t.Fatalf("failed Put replaced stored data with %q", data)
+	}
+}
 
 // TestMemoryStore basic tests of the memory store
 func TestMemoryStore(t *testing.T) {

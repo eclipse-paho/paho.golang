@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -388,6 +389,61 @@ func TestAddToSessionReturnsNilChannelOnStoreFailure(t *testing.T) {
 	}
 	if publish.PacketID != 0 {
 		t.Fatalf("AddToSession left packet ID %d assigned after the store failure", publish.PacketID)
+	}
+}
+
+// Encoding errors in the default memory store must release the packet ID and send
+// quota so that the caller can correct the packet and retry on the same connection.
+func TestAddToSessionEncodingErrorReleasesResources(t *testing.T) {
+	for _, qos := range []byte{1, 2} {
+		for _, invalidID := range []int{-1, 268435456} {
+			t.Run(fmt.Sprintf("qos%d/identifier%d", qos, invalidID), func(t *testing.T) {
+				s := NewInMemory()
+				receiveMaximum := uint16(1)
+				connack := &packets.Connack{Properties: &packets.Properties{ReceiveMaximum: &receiveMaximum}}
+				if err := s.ConAckReceived(io.Discard, &packets.Connect{}, connack); err != nil {
+					t.Fatalf("ConAckReceived: %v", err)
+				}
+				publish := &packets.Publish{
+					QoS:        qos,
+					Topic:      "encoding/failure",
+					Properties: &packets.Properties{SubscriptionIdentifier: &invalidID},
+				}
+				response, err := s.AddToSession(context.Background(), publish)
+				t.Cleanup(func() { _ = s.Close() })
+				if err == nil {
+					t.Fatal("AddToSession succeeded with an invalid subscription identifier")
+				}
+				if response != nil || publish.PacketID != 0 {
+					t.Fatalf("failed AddToSession returned channel %v and packet ID %d", response, publish.PacketID)
+				}
+				s.mu.Lock()
+				pending := len(s.clientPackets)
+				s.mu.Unlock()
+				if pending != 0 {
+					t.Fatalf("encoding failure left %d packet IDs allocated", pending)
+				}
+				ids, err := s.clientStore.List()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(ids) != 0 {
+					t.Fatalf("encoding failure left stored packets: %v", ids)
+				}
+
+				// With a receive maximum of one, this blocks if the failed write leaked quota.
+				publish.Properties.SubscriptionIdentifier = nil
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				response, err = s.AddToSession(ctx, publish)
+				if err != nil {
+					t.Fatalf("AddToSession after correcting the packet: %v", err)
+				}
+				if response == nil || publish.PacketID == 0 {
+					t.Fatal("successful retry did not return a response channel and packet ID")
+				}
+			})
+		}
 	}
 }
 
