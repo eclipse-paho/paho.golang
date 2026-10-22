@@ -762,10 +762,12 @@ func (c *Client) Subscribe(ctx context.Context, s *Subscribe) (*Suback, error) {
 		return nil, err
 	}
 
-	// From this point on the message is in store, and ret will receive something regardless of whether we succeed in
-	// writing the packet to the connection or not.
+	// The session owns the identifier until acknowledgement, local rejection, or disconnection.
 	if _, err := sp.WriteTo(c.config.Conn); err != nil {
-		// The packet will remain in the session state until `Session` is notified of the disconnection.
+		if errors.Is(err, packets.ErrEncoding) {
+			c.config.Session.PacketNotSent(sp.PacketID, ret)
+		}
+		// A transport failure may have sent data, so its identifier remains reserved.
 		return nil, err
 	}
 	c.config.PingHandler.PacketSent()
@@ -827,10 +829,12 @@ func (c *Client) Unsubscribe(ctx context.Context, u *Unsubscribe) (*Unsuback, er
 		return nil, err
 	}
 
-	// From this point on the message is in store, and ret will receive something regardless of whether we succeed in
-	// writing the packet to the connection or not
+	// The session owns the identifier until acknowledgement, local rejection, or disconnection.
 	if _, err := up.WriteTo(c.config.Conn); err != nil {
-		// The packet will remain in the session state until `Session` is notified of the disconnection.
+		if errors.Is(err, packets.ErrEncoding) {
+			c.config.Session.PacketNotSent(up.PacketID, ret)
+		}
+		// A transport failure may have sent data, so its identifier remains reserved.
 		return nil, err
 	}
 	c.config.PingHandler.PacketSent()

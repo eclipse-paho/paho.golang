@@ -33,6 +33,7 @@ import (
 	"github.com/eclipse/paho.golang/packets"
 	paholog "github.com/eclipse/paho.golang/paho/log"
 	"github.com/eclipse/paho.golang/paho/session"
+	"github.com/eclipse/paho.golang/paho/session/state"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -210,6 +211,193 @@ func TestClientSubscribe(t *testing.T) {
 	assert.Equal(t, []byte{1, 2, 0}, sa.Reasons)
 
 	time.Sleep(10 * time.Millisecond)
+}
+
+// Rejected subscriptions must not consume the packet IDs shared with publishes.
+func TestClientSubscribeEncodingErrorDoesNotExhaustPacketIDs(t *testing.T) {
+	ts := basictestserver.New(paholog.NOOPLogger{})
+	ts.SetResponse(packets.CONNACK, &packets.Connack{Properties: &packets.Properties{}})
+	ts.SetResponse(packets.SUBACK, &packets.Suback{
+		Reasons:    []byte{1},
+		Properties: &packets.Properties{},
+	})
+	ts.SetResponse(packets.PUBACK, &packets.Puback{
+		ReasonCode: packets.PubackSuccess,
+		Properties: &packets.Properties{},
+	})
+	go ts.Run()
+	defer ts.Stop()
+
+	c := NewClient(ClientConfig{Conn: ts.ClientConn(), PacketTimeout: time.Second})
+	defer c.close()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	_, err := c.Connect(ctx, &Connect{ClientID: "subscribe-encoding-error", CleanStart: true})
+	require.NoError(t, err)
+
+	subscribe := &Subscribe{
+		Subscriptions: []SubscribeOptions{{Topic: "test/encoding-error", QoS: 1}},
+		Properties:    &SubscribeProperties{},
+	}
+	invalidIDs := []int{-1, 268435456}
+	for i := 0; i < 65536; i++ {
+		subscribe.Properties.SubscriptionIdentifier = &invalidIDs[i%len(invalidIDs)]
+		sa, err := c.Subscribe(ctx, subscribe)
+		if !errors.Is(err, packets.ErrEncoding) {
+			t.Fatalf("rejected subscription %d: got %v; want encoding error", i+1, err)
+		}
+		if sa != nil {
+			t.Fatalf("rejected subscription %d returned a SUBACK", i+1)
+		}
+	}
+
+	// A corrected request and a publish must still complete on the same connection.
+	validID := 1
+	subscribe.Properties.SubscriptionIdentifier = &validID
+	sa, err := c.Subscribe(ctx, subscribe)
+	require.NoError(t, err)
+	require.NotNil(t, sa)
+	assert.Equal(t, []byte{1}, sa.Reasons)
+	pa, err := c.Publish(ctx, &Publish{Topic: "test/encoding-error", QoS: 1})
+	require.NoError(t, err)
+	require.NotNil(t, pa)
+	assert.Equal(t, byte(packets.PubackSuccess), pa.ReasonCode)
+}
+
+type recordingSubscriptionSession struct {
+	*state.State
+	packet    session.Packet
+	response  <-chan packets.ControlPacket
+	discarded int
+}
+
+func (s *recordingSubscriptionSession) AddToSession(ctx context.Context, packet session.Packet) (<-chan packets.ControlPacket, error) {
+	s.packet = packet
+	var err error
+	s.response, err = s.State.AddToSession(ctx, packet)
+	return s.response, err
+}
+
+func (s *recordingSubscriptionSession) PacketNotSent(id uint16, response <-chan packets.ControlPacket) {
+	s.discarded++
+	s.State.PacketNotSent(id, response)
+}
+
+// These tests initialize the session directly, so only the connection's Write is used.
+type subscriptionWriteConn struct {
+	net.Conn
+	err    error
+	limit  int
+	calls  int
+	cancel context.CancelFunc
+}
+
+func (c *subscriptionWriteConn) Write(p []byte) (int, error) {
+	c.calls++
+	if c.cancel != nil {
+		c.cancel()
+	}
+	if c.err != nil {
+		return min(c.limit, len(p)), c.err
+	}
+	return len(p), nil
+}
+
+func TestSubscribeEncodingFailureNotifiesSession(t *testing.T) {
+	s := &recordingSubscriptionSession{State: state.NewInMemory()}
+	defer s.Close()
+	require.NoError(t, s.ConAckReceived(io.Discard, &packets.Connect{}, &packets.Connack{}))
+	conn := &subscriptionWriteConn{err: io.ErrClosedPipe}
+	c := NewClient(ClientConfig{Conn: conn, Session: s})
+	invalidID := -1
+	sa, err := c.Subscribe(t.Context(), &Subscribe{
+		Subscriptions: []SubscribeOptions{{Topic: "test/encoding-error", QoS: 1}},
+		Properties:    &SubscribeProperties{SubscriptionIdentifier: &invalidID},
+	})
+	require.ErrorIs(t, err, packets.ErrEncoding)
+	assert.Nil(t, sa)
+	require.NotNil(t, s.packet, "encoding must be attempted after AddToSession, without prevalidation")
+	assert.Equal(t, 1, s.discarded)
+	assert.Zero(t, conn.calls)
+	select {
+	case response, ok := <-s.response:
+		require.True(t, ok)
+		assert.Zero(t, response.Type)
+	default:
+		t.Fatal("unsent subscription was not removed from the session")
+	}
+	_, ok := <-s.response
+	assert.False(t, ok)
+}
+
+func TestSubscriptionWriteFailureRetainsIdentifier(t *testing.T) {
+	for _, request := range []struct {
+		name    string
+		ackType byte
+		send    func(context.Context, *Client) error
+	}{
+		{"subscribe", packets.SUBACK, func(ctx context.Context, c *Client) error {
+			_, err := c.Subscribe(ctx, &Subscribe{Subscriptions: []SubscribeOptions{{Topic: "test/failure", QoS: 1}}})
+			return err
+		}},
+		{"unsubscribe", packets.UNSUBACK, func(ctx context.Context, c *Client) error {
+			_, err := c.Unsubscribe(ctx, &Unsubscribe{Topics: []string{"test/failure"}})
+			return err
+		}},
+	} {
+		for _, failure := range []struct {
+			name string
+			n    int
+			err  error
+		}{
+			{"zero bytes", 0, io.ErrClosedPipe},
+			{"partial write", 1, io.ErrClosedPipe},
+			{"cancelled while awaiting acknowledgement", 0, nil},
+		} {
+			t.Run(request.name+"/"+failure.name, func(t *testing.T) {
+				s := &recordingSubscriptionSession{State: state.NewInMemory()}
+				defer s.Close()
+				require.NoError(t, s.ConAckReceived(io.Discard, &packets.Connect{}, &packets.Connack{}))
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				conn := &subscriptionWriteConn{err: failure.err, limit: failure.n}
+				wantErr := failure.err
+				if wantErr == nil {
+					conn.cancel = cancel // Cancel only after the request reaches the writer.
+					wantErr = context.Canceled
+				}
+				c := NewClient(ClientConfig{Conn: conn, Session: s})
+				err := request.send(ctx, c)
+				require.ErrorIs(t, err, wantErr)
+				assert.False(t, errors.Is(err, packets.ErrEncoding))
+				assert.Positive(t, conn.calls)
+				assert.Zero(t, s.discarded)
+				select {
+				case <-s.response:
+					t.Fatal("request was removed before its acknowledgement")
+				default:
+				}
+
+				// Even after the caller returns an error, an acknowledgement must complete the request.
+				sent := &packets.ControlPacket{Content: s.packet.(packets.Packet)}
+				ack := packets.NewControlPacket(request.ackType)
+				switch content := ack.Content.(type) {
+				case *packets.Suback:
+					content.PacketID = sent.PacketID()
+				case *packets.Unsuback:
+					content.PacketID = sent.PacketID()
+				}
+				require.NoError(t, s.PacketReceived(ack, nil))
+				select {
+				case response, ok := <-s.response:
+					require.True(t, ok)
+					assert.Equal(t, request.ackType, response.Type)
+				default:
+					t.Fatal("request's identifier was not retained for its acknowledgement")
+				}
+			})
+		}
+	}
 }
 
 func TestClientUnsubscribe(t *testing.T) {

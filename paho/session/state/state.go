@@ -82,7 +82,7 @@ type (
 		// channel. One and only one message will be sent (and the channel closed).
 		// We also guarantee to always send to the channel (assuming there is a clean shutdown) so that the end user knows
 		// the status of the request.
-		responseChan chan<- packets.ControlPacket
+		responseChan chan packets.ControlPacket
 	}
 )
 
@@ -403,7 +403,7 @@ func (s *State) AddToSession(ctx context.Context, packet session.Packet) (<-chan
 	return response, nil
 }
 
-func (s *State) addToSession(ctx context.Context, packet session.Packet, response chan<- packets.ControlPacket) error {
+func (s *State) addToSession(ctx context.Context, packet session.Packet, response chan packets.ControlPacket) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.mu.Lock() // There may be a delay waiting for semaphore, so check for connection before and after
@@ -479,6 +479,22 @@ func (s *State) addToSession(ctx context.Context, packet session.Packet, respons
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// PacketNotSent releases an unsent subscription request. Only subscription
+// requests can be removed; persisted publishes may already have been retransmitted
+// independently by session recovery.
+func (s *State) PacketNotSent(packetID uint16, response <-chan packets.ControlPacket) {
+	s.mu.Lock()
+	transaction, ok := s.clientPackets[packetID]
+	if !ok || response == nil || transaction.responseChan != response ||
+		(transaction.packetType != packets.SUBSCRIBE && transaction.packetType != packets.UNSUBSCRIBE) {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.clientPackets, packetID)
+	s.mu.Unlock()
+	complete(transaction, packets.ControlPacket{})
 }
 
 // endClientGenerated should be called when a client-generated transaction has been fully acknowledged
@@ -733,7 +749,7 @@ func (s *State) allocateNextPacketId(forPacketType byte) (uint16, <-chan packets
 
 // allocateNextPacketIdLocked assigns the next available packet ID.
 // The caller must hold s.mu.
-func (s *State) allocateNextPacketIdLocked(forPacketType byte, response chan<- packets.ControlPacket) (uint16, error) {
+func (s *State) allocateNextPacketIdLocked(forPacketType byte, response chan packets.ControlPacket) (uint16, error) {
 	cg := clientGenerated{
 		packetType:   forPacketType,
 		responseChan: response,

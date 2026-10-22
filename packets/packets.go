@@ -24,6 +24,12 @@ import (
 	"sync"
 )
 
+// ErrEncoding identifies a failure to encode a packet, before WriteTo calls the
+// destination writer. Retrying the same packet without correcting it will fail.
+// WriteTo wraps the underlying encoding error; errors from the destination writer
+// are returned unchanged and are not classified as encoding failures.
+var ErrEncoding = errors.New("packet encoding failed")
+
 // PacketType is a type alias to byte representing the different
 // MQTT control packet types
 // type PacketType byte
@@ -90,7 +96,7 @@ func NewThreadSafeConn(c net.Conn) net.Conn {
 func (f *FixedHeader) WriteTo(w io.Writer) (int64, error) {
 	vbi, err := encodeVBI(f.remainingLength)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%w: %w", ErrEncoding, err)
 	}
 
 	if _, err := w.Write([]byte{byte(f.Type)<<4 | f.Flags}); err != nil {
@@ -330,12 +336,13 @@ func ReadPacket(r io.Reader) (*ControlPacket, error) {
 }
 
 // WriteTo writes a packet to an io.Writer, handling packing all the parts of
-// a control packet.
+// a control packet. Encoding failures wrap ErrEncoding and occur before any
+// call to the destination writer.
 func (c *ControlPacket) WriteTo(w io.Writer) (int64, error) {
 	c.remainingLength = 0 // ignore previous remainingLength (if any)
 	buffers, err := c.Content.Buffers()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%w: %w", ErrEncoding, err)
 	}
 	for _, b := range buffers {
 		c.remainingLength += len(b)

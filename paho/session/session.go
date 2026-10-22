@@ -69,6 +69,19 @@ type SessionManager interface {
 	// For SUBSCRIBE and UNSUBSCRIBE, the final acknowledgements are SUBACK and UNSUBACK respectively.
 	AddToSession(ctx context.Context, packet Packet) (<-chan packets.ControlPacket, error)
 
+	// PacketNotSent removes the transaction matching both packetID and the response
+	// channel returned by AddToSession. Implementations must use a distinct channel
+	// for each transaction so a late notification cannot remove a reused identifier.
+	// It delivers one zero-value ControlPacket and closes that channel, as for other
+	// removals without an acknowledgement. A nil channel, an already removed or
+	// mismatched transaction, or a packet other than SUBSCRIBE/UNSUBSCRIBE is ignored.
+	//
+	// Only call this after an encoding failure known to precede all destination
+	// writes (errors.Is(err, packets.ErrEncoding)). It must not be used for network
+	// errors or acknowledgement timeouts. Calls must be safe to repeat and to make
+	// concurrently with other session operations, including connection changes.
+	PacketNotSent(packetID uint16, response <-chan packets.ControlPacket)
+
 	// PacketReceived must be called when any packet with a packet identifier is received. It will make any required
 	// response and pass any `PUBLISH` messages that need to be passed to the user via the channel.
 	PacketReceived(*packets.ControlPacket, chan<- *packets.Publish) error
