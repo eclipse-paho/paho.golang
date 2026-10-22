@@ -622,6 +622,188 @@ func TestAddToSessionOwnsResponseChannel(t *testing.T) {
 	}
 }
 
+func requireRemovedResponse(t *testing.T, response <-chan packets.ControlPacket) {
+	t.Helper()
+	select {
+	case got, ok := <-response:
+		if !ok || got.Type != 0 {
+			t.Fatalf("removed response is type %d, open=%t; want one zero-value response", got.Type, ok)
+		}
+	default:
+		t.Fatal("removed transaction was not completed")
+	}
+	select {
+	case _, ok := <-response:
+		if ok {
+			t.Fatal("removed transaction received more than one response")
+		}
+	default:
+		t.Fatal("removed transaction's response channel was not closed")
+	}
+}
+
+func TestPacketNotSentReleasesSubscription(t *testing.T) {
+	for _, packetType := range []byte{packets.SUBSCRIBE, packets.UNSUBSCRIBE} {
+		request := packets.NewControlPacket(packetType)
+		t.Run(request.PacketType(), func(t *testing.T) {
+			s := NewInMemory()
+			t.Cleanup(func() { _ = s.Close() })
+			if err := s.ConAckReceived(io.Discard, &packets.Connect{}, &packets.Connack{}); err != nil {
+				t.Fatal(err)
+			}
+			response, err := s.AddToSession(t.Context(), request.Content.(session.Packet))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.PacketNotSent(request.PacketID(), nil)
+			s.PacketNotSent(request.PacketID(), make(chan packets.ControlPacket))
+			select {
+			case <-response:
+				t.Fatal("a notification for a different transaction removed the request")
+			default:
+			}
+			s.PacketNotSent(request.PacketID(), response)
+			s.PacketNotSent(request.PacketID(), response) // Repeated notification must be harmless.
+			requireRemovedResponse(t, response)
+
+			s.mu.Lock()
+			remaining := len(s.clientPackets)
+			s.lastMid = request.PacketID() - 1 // Make the allocator try the released identifier first.
+			s.mu.Unlock()
+			if remaining != 0 {
+				t.Fatalf("PacketNotSent left %d identifiers allocated", remaining)
+			}
+			next := packets.NewControlPacket(packetType)
+			if _, err := s.AddToSession(t.Context(), next.Content.(session.Packet)); err != nil {
+				t.Fatal(err)
+			}
+			if next.PacketID() != request.PacketID() {
+				t.Fatalf("identifier %d was not available for reuse; got %d", request.PacketID(), next.PacketID())
+			}
+		})
+	}
+}
+
+func TestPacketNotSentPreservesPublish(t *testing.T) {
+	s := NewInMemory()
+	t.Cleanup(func() { _ = s.Close() })
+	receiveMaximum := uint16(1)
+	if err := s.ConAckReceived(io.Discard, &packets.Connect{}, &packets.Connack{
+		Properties: &packets.Properties{ReceiveMaximum: &receiveMaximum},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	publish := &packets.Publish{QoS: 2, Topic: "test/persistent"}
+	response, err := s.AddToSession(t.Context(), publish)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, packetType := range []byte{packets.PUBLISH, packets.PUBREL} {
+		if packetType == packets.PUBREL {
+			pubrec := packets.NewControlPacket(packets.PUBREC)
+			pubrec.Content.(*packets.Pubrec).PacketID = publish.PacketID
+			if err := s.PacketReceived(pubrec, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.PacketNotSent(publish.PacketID, response)
+		s.mu.Lock()
+		transaction, exists := s.clientPackets[publish.PacketID]
+		s.mu.Unlock()
+		if !exists || transaction.packetType != packetType {
+			t.Fatalf("PacketNotSent removed a publish transaction: exists=%t type=%d", exists, transaction.packetType)
+		}
+		ids, err := s.clientStore.List()
+		if err != nil || len(ids) != 1 || ids[0] != publish.PacketID {
+			t.Fatalf("PacketNotSent changed persisted packets: ids=%v err=%v", ids, err)
+		}
+		s.inflight.mu.Lock()
+		quota := s.inflight.quota
+		s.inflight.mu.Unlock()
+		if quota != 0 {
+			t.Fatalf("PacketNotSent released a publish's send quota: %d", quota)
+		}
+		select {
+		case <-response:
+			t.Fatal("PacketNotSent completed a publish transaction")
+		default:
+		}
+	}
+}
+
+func TestPacketNotSentWhileReconnecting(t *testing.T) {
+	s := NewInMemory()
+	t.Cleanup(func() { _ = s.Close() })
+	expiry := uint32(60)
+	connect := &packets.Connect{Properties: &packets.Properties{SessionExpiryInterval: &expiry}}
+	connack := &packets.Connack{SessionPresent: true}
+	if err := s.ConAckReceived(io.Discard, connect, connack); err != nil {
+		t.Fatal(err)
+	}
+	for range 200 {
+		request := &packets.Subscribe{}
+		response, err := s.AddToSession(t.Context(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		wg.Go(func() {
+			<-start
+			s.PacketNotSent(request.PacketID, response)
+		})
+		wg.Go(func() {
+			<-start
+			if err := s.ConnectionLost(nil); err != nil {
+				t.Error(err)
+				return
+			}
+			if err := s.ConAckReceived(io.Discard, connect, connack); err != nil {
+				t.Error(err)
+			}
+		})
+		close(start)
+		wg.Wait()
+		requireRemovedResponse(t, response)
+
+		// Reuse the same identifier on the new connection, then deliver a late notification.
+		s.mu.Lock()
+		s.lastMid = request.PacketID - 1
+		s.mu.Unlock()
+		next := &packets.Subscribe{}
+		nextResponse, err := s.AddToSession(t.Context(), next)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if next.PacketID != request.PacketID {
+			t.Fatalf("expected identifier %d to be reused, got %d", request.PacketID, next.PacketID)
+		}
+		s.PacketNotSent(request.PacketID, response)
+		select {
+		case <-nextResponse:
+			t.Fatal("late notification removed the replacement transaction")
+		default:
+		}
+		ack := packets.NewControlPacket(packets.SUBACK)
+		ack.Content.(*packets.Suback).PacketID = next.PacketID
+		if err := s.PacketReceived(ack, nil); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got, ok := <-nextResponse:
+			if !ok || got.Type != packets.SUBACK {
+				t.Fatalf("replacement transaction returned type %d, open=%t", got.Type, ok)
+			}
+		default:
+			t.Fatal("replacement transaction was not acknowledged")
+		}
+		s.PacketNotSent(next.PacketID, nextResponse) // Harmless after an acknowledgement, too.
+		if _, ok := <-nextResponse; ok {
+			t.Fatal("acknowledged transaction's response channel was not closed")
+		}
+	}
+}
+
 // listFailOnceStore fails on the first attempt to call `List`, subsequent attempts succeed.
 type listFailOnceStore struct {
 	*memory.Store
