@@ -24,6 +24,7 @@ import (
 	"github.com/eclipse/paho.golang/internal/basictestserver"
 	"github.com/eclipse/paho.golang/packets"
 	paholog "github.com/eclipse/paho.golang/paho/log"
+	"github.com/eclipse/paho.golang/paho/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -71,6 +72,61 @@ func TestPackedIdNoExhaustion(t *testing.T) {
 	// Ensure things shutdown
 	cancel()
 	wg.Wait()
+}
+
+func TestSubscribeInvalidSubscriptionIdentifierDoesNotExhaustPacketIDs(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+
+	ts := basictestserver.New(paholog.NOOPLogger{})
+	ts.SetResponse(packets.CONNACK, &packets.Connack{Properties: &packets.Properties{}})
+	ts.SetResponse(packets.SUBACK, &packets.Suback{
+		Reasons:    []byte{0},
+		Properties: &packets.Properties{},
+	})
+	go ts.Run()
+	defer ts.Stop()
+
+	c := NewClient(ClientConfig{Conn: ts.ClientConn()})
+	_, err := c.Connect(ctx, &Connect{ClientID: "invalid-subscription-identifier"})
+	require.NoError(t, err)
+	defer func() {
+		c.close()
+		<-c.Done()
+	}()
+
+	s := &Subscribe{
+		Properties:    &SubscribeProperties{},
+		Subscriptions: []SubscribeOptions{{Topic: "test/1"}},
+	}
+	invalid := []int{-1, 268435456}
+	for i := 0; i < 70000; i++ {
+		s.Properties.SubscriptionIdentifier = &invalid[i%len(invalid)]
+		sa, err := c.Subscribe(ctx, s)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, session.ErrPacketIdentifiersExhausted)
+		require.Nil(t, sa)
+	}
+
+	for _, id := range []int{-1, 0, 268435456} {
+		s.Properties.SubscriptionIdentifier = &id
+		sa, err := c.Subscribe(ctx, s)
+		require.ErrorIs(t, err, ErrInvalidArguments)
+		require.Nil(t, sa)
+	}
+
+	minID, maxID := 1, 268435455
+	for _, properties := range []*SubscribeProperties{
+		nil,
+		{},
+		{SubscriptionIdentifier: &minID},
+		{SubscriptionIdentifier: &maxID},
+	} {
+		s.Properties = properties
+		sa, err := c.Subscribe(ctx, s)
+		require.NoError(t, err)
+		require.Equal(t, []byte{0}, sa.Reasons)
+	}
 }
 
 // Note: We no longer test for Packet Id Exhaustion because the way the CONNACK Receive Maximum now works makes

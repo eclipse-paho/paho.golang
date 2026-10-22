@@ -746,6 +746,11 @@ func (c *Client) Subscribe(ctx context.Context, s *Subscribe) (*Suback, error) {
 	if !c.serverProps.SubIDAvailable && s.Properties != nil && s.Properties.SubscriptionIdentifier != nil {
 		return nil, fmt.Errorf("%w: cannot send subscribe with subID set, server does not support subID", ErrInvalidArguments)
 	}
+	if s.Properties != nil && s.Properties.SubscriptionIdentifier != nil {
+		if id := *s.Properties.SubscriptionIdentifier; id < 1 || id > 268435455 {
+			return nil, fmt.Errorf("%w: subscription identifier must be between 1 and 268435455", ErrInvalidArguments)
+		}
+	}
 	if !c.serverProps.SharedSubAvailable {
 		for _, sub := range s.Subscriptions {
 			if strings.HasPrefix(sub.Topic, "$share") {

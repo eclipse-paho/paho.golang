@@ -37,7 +37,7 @@ type (
 // SubscribeProperties is a struct of the properties that can be set
 // for a Subscribe packet
 type SubscribeProperties struct {
-	SubscriptionIdentifier *int
+	SubscriptionIdentifier *int // If set, must be between 1 and 268435455 inclusive.
 	User                   UserProperties
 }
 
