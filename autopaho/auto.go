@@ -31,6 +31,7 @@ import (
 	"github.com/eclipse/paho.golang/autopaho/queue/memory"
 	"github.com/eclipse/paho.golang/packets"
 	"github.com/eclipse/paho.golang/paho/log"
+	"github.com/eclipse/paho.golang/paho/session"
 	"github.com/eclipse/paho.golang/paho/session/state"
 	"github.com/gorilla/websocket"
 
@@ -478,8 +479,9 @@ type QueuePublish struct {
 }
 
 // PublishViaQueue is used to send a publication to the MQTT server via a queue (by default memory based).
-// An error will be returned if the message could not be added to the queue, otherwise the message will be delivered
-// in the background with no status updates available.
+// An error will be returned if the message could not be added to the queue; otherwise delivery is attempted in the
+// background. ClientConfig.PublishEvents can report its progress, including PublishEventQueueDiscarded if local
+// validation later rejects it and the queue entry is removed.
 // Use this function when you wish to rely upon the libraries best-effort to transmit the message; it is anticipated
 // that this will generally be in situations where the network link or power supply is unreliable.
 // Messages will be written to a queue (configuring a disk-based queue is recommended) and transmitted where possible.
@@ -627,10 +629,13 @@ connectionLoop:
 				if _, err = cli.PublishWithOptions(ctx, &pub2, paho.PublishOptions{Method: paho.PublishMethod_AsyncSend}); err != nil {
 					c.errors.Printf("error publishing from queue: %s", err)
 					if errors.Is(err, paho.ErrInvalidArguments) { // Some errors should not be retried
-						if err := entry.Remove(); err != nil {
-							c.errors.Printf("error removing queue entry: %s", err)
+						if removeErr := entry.Remove(); removeErr != nil && !errors.Is(removeErr, queue.ErrEmpty) {
+							c.errors.Printf("error removing queue entry: %s", removeErr)
+						} else if onEvent := c.cfg.PublishEvents.OnEvent; onEvent != nil {
+							// Queue entries have no attempt history. An earlier attempt (possibly before a restart)
+							// may have transmitted this publication, so its delivery remains unknown.
+							onEvent(session.PublishEvent{Type: session.PublishEventQueueDiscarded, Source: p, Err: err})
 						}
-						// Need a way to notify the user of this
 					} else if errors.Is(err, paho.ErrNetworkErrorAfterStored) { // Message in session so remove from queue
 						if err := entry.Remove(); err != nil {
 							c.errors.Printf("error removing queue entry: %s", err)
