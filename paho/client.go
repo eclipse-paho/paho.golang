@@ -451,7 +451,12 @@ func (c *Client) Ack(pb *Publish) error {
 
 // ack acknowledges a message (note: called by acksTracker to ensure these are sent in order)
 func (c *Client) ack(pb *packets.Publish) {
-	c.config.Session.Ack(pb)
+	if pb.QoS == 0 {
+		return
+	}
+	if err := c.config.Session.Ack(pb); err != nil {
+		c.reportError(fmt.Errorf("session failed acknowledging publish %d: %w", pb.PacketID, err))
+	}
 }
 
 // routePublishPackets listens on c.publishPackets and passes received messages to the handlers

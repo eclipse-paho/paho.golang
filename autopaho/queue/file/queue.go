@@ -10,18 +10,23 @@
  *  and the Eclipse Distribution License is available at
  *    http://www.eclipse.org/org/documents/edl-v10.php.
  *
- *  SPDX-License-Identifier: EPL-2.0 OR BSD-3-Clause
+ * AI Disclosure: The durable queue support was generated with OpenAI GPT-6 via Codex.
+ * AI-generated portions are made available under CC0-1.0.
+ * SPDX-License-Identifier: (EPL-2.0 OR BSD-3-Clause) AND CC0-1.0
+ * Assisted-by: OpenAI GPT-6
  */
 
+// Package file provides a sequence-ordered disk queue. The basicfile sibling
+// package retains <- v0.23 timestamp-ordered implementation as an opt-out.
 package file
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	"github.com/eclipse/paho.golang/autopaho/queue"
 )
@@ -32,62 +37,78 @@ import (
 
 const (
 	folderPermissions = os.FileMode(0770)
-	filePermissions   = os.FileMode(0666)
 	corruptExtension  = ".CORRUPT" // quarantined files will be given this extension
 )
 
-var (
-	maxTime = time.Unix(1<<63-62135596801, 999999999)
-)
+// Option configures a file queue created by New.
+type Option func(*options)
 
-// Queue - basic file based queue
+type options struct {
+	durable bool
+}
+
+// Queue is a sequence-ordered file-based queue.
 type Queue struct {
 	mu              sync.Mutex
 	path            string
 	prefix          string
 	extension       string
-	queueEmpty      bool              // true is the queue is currently empty
-	waiting         []chan<- struct{} // closed when something arrives in the queue
-	waitingForEmpty []chan<- struct{} // closed when queue is empty
+	queueEmpty      bool                 // true is the queue is currently empty
+	waiting         []chan<- struct{}    // closed when something arrives in the queue
+	waitingForEmpty []chan<- struct{}    // closed when queue is empty
+	lastSequence    uint64               // The last sequence written to disk
+	syncFile        func(*os.File) error // nil preserves the default unsynced writes
 }
 
-// New creates a new file-based queue. Note that a file is written, read and deleted as part of this process to check
-// that the path is usable.
-// NOTE: Order is maintained using file ModTime, so there may be issues if the interval between messages is less than
-// the file system ModTime resolution.
-func New(path string, prefix string, extension string) (*Queue, error) {
+// New creates a new file-based queue.
+// Note that a file is written, read and deleted as part of this process to check that the path is usable.
+// New entries are ordered by a sequence in their filenames, independently of the clock and filesystem timestamp
+// resolution. Legacy files are read first, ordered by ModTime and then filename. Only one Queue may use a
+// path/prefix/extension namespace at a time, and its files must not be modified externally.
+// By default New does not sync writes. Pass WithDurable() to enable durable mode.
+func New(path string, prefix string, extension string, opts ...Option) (*Queue, error) {
+	var config options
+	for _, opt := range opts {
+		opt(&config)
+	}
+	var syncFile func(*os.File) error
+	if config.durable {
+		syncFile = (*os.File).Sync
+	}
+	return newQueue(path, prefix, extension, syncFile)
+}
+
+func newQueue(path, prefix, extension string, syncFile func(*os.File) error) (*Queue, error) {
 	if len(extension) > 0 && extension[0] != '.' {
 		extension = "." + extension
 	}
 
-	if err := os.MkdirAll(path, folderPermissions); err != nil {
-		return nil, fmt.Errorf("failed to create store folder: %w", err)
+	if err := makeQueueDirectory(path, syncFile); err != nil {
+		return nil, fmt.Errorf("failed to prepare queue folder: %w", err)
 	}
 
-	// Better to fail fast; so we check that a file can be written/read with the passed in info
-	fn := filepath.Join(path, prefix+"TEST"+extension)
-	if err := os.WriteFile(fn, []byte("test"), filePermissions); err != nil {
-		return nil, fmt.Errorf("failed to write test file to specified folder: %w", err)
-	}
-	if _, err := os.ReadFile(fn); err != nil {
-		return nil, fmt.Errorf("failed to read test file from specified folder: %w", err)
-	}
-	if err := os.Remove(fn); err != nil {
-		return nil, fmt.Errorf("failed to remove test file from specified folder: %w", err)
+	if err := probeDirectory(path, prefix, extension, ""); err != nil {
+		return nil, err
 	}
 
 	q := &Queue{
 		path:      path,
 		prefix:    prefix,
 		extension: extension,
+		syncFile:  syncFile,
 	}
 
-	_, err := q.oldestEntry()
-	if err == io.EOF {
-		q.queueEmpty = true
-	} else if err != nil {
-		return nil, fmt.Errorf("failed checking for oldest entry: %w", err)
+	entries, last, err := readEntries(path, prefix, extension)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading queue: %w", err)
 	}
+	for _, e := range entries {
+		if e.Sequence != 0 && e.Key != "" {
+			return nil, fmt.Errorf("invalid queue filename %q", e.Name)
+		}
+	}
+	q.lastSequence = last
+	q.queueEmpty = len(entries) == 0
 
 	return q, nil
 
@@ -121,12 +142,19 @@ func (q *Queue) WaitForEmpty() chan struct{} {
 	return c
 }
 
-// Enqueue add item to the queue.
+// Enqueue adds an item to the queue. In durable mode, it syncs the file before
+// publishing it and the directory afterwards. ErrDurabilityUncertain means the
+// entry was published but directory sync failed; retrying can enqueue a duplicate.
 func (q *Queue) Enqueue(p io.Reader) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	err := q.put(p)
-	if err == nil && q.queueEmpty {
+	if err != nil {
+		return err
+	}
+	err = q.syncDirectory()
+	// A rename remains visible even if the subsequent directory sync failed.
+	if q.queueEmpty {
 		q.queueEmpty = false
 		for _, c := range q.waiting {
 			close(c)
@@ -157,22 +185,15 @@ func (q *Queue) Peek() (queue.Entry, error) {
 
 // put writes out an item to disk
 func (q *Queue) put(p io.Reader) error {
-	// Use CreateTemp to generate a file with a unique name (it will be removed when packet has been transmitted)
-	f, err := os.CreateTemp(q.path, q.prefix+"*"+q.extension)
+	sequence, err := nextSequence(&q.lastSequence)
 	if err != nil {
 		return err
 	}
-
-	if _, err = io.Copy(f, p); err != nil {
-		f.Close()
-		_ = os.Remove(f.Name()) // Attempt to remove the partial file (not much we can do if this fails)
+	name := sequenceFilename(q.prefix, q.extension, sequence, "")
+	return writeEntry(q.path, name, func(w io.Writer) error {
+		_, err := io.Copy(w, p)
 		return err
-	}
-	if err = f.Close(); err != nil {
-		_ = os.Remove(f.Name()) // Attempt to remove the partial file (not much we can do if this fails)
-		return err
-	}
-	return nil
+	}, q.syncFile)
 }
 
 // get() returns a ReadCloser that accesses the oldest file available
@@ -186,50 +207,26 @@ func (q *Queue) get() (entry, error) {
 	if err != nil {
 		return entry{}, err
 	}
-	return entry{f: f}, nil
+	return entry{f: f, syncDirectory: q.syncDirectory}, nil
 }
 
 // oldestEntry returns the filename of the oldest entry in the queue (if any - io.EOF means none)
 func (q *Queue) oldestEntry() (string, error) {
-	entries, err := os.ReadDir(q.path)
+	entries, _, err := readEntries(q.path, q.prefix, q.extension)
 	if err != nil {
 		return "", fmt.Errorf("failed to read dir: %w", err)
 	}
 
-	// Search for the oldest file
-	var oldFn string
-	oldTime := maxTime
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		fn := entry.Name()
-		if match, err := filepath.Match(q.prefix+"*"+q.extension, fn); err != nil {
-			return "", fmt.Errorf("failed to read match %s: %w", fn, err)
-		} else if !match {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return "", fmt.Errorf("failed to retrieve file info for %s: %w", fn, err)
-		}
-		fileModTime := info.ModTime()
-		if !fileModTime.Before(oldTime) {
-			continue
-		}
-		oldFn = filepath.Join(q.path, fn)
-		oldTime = fileModTime
-	}
-	if oldTime.Equal(maxTime) {
+	if len(entries) == 0 {
 		return "", io.EOF
 	}
-	return oldFn, nil
+	return filepath.Join(q.path, entries[0].Name), nil
 }
 
 // entry is used to return a queue entry from Peek
 type entry struct {
-	f *os.File
+	f             *os.File
+	syncDirectory func() error
 }
 
 // Reader provides access to the file contents
@@ -248,10 +245,7 @@ func (e entry) Remove() error {
 	if err := os.Remove(e.f.Name()); err != nil {
 		return err
 	}
-	if cErr != nil {
-		return cErr
-	}
-	return nil
+	return e.syncAfterChange(cErr)
 }
 
 // Quarantine flag that this entry has an error (remove from queue, potentially retaining data with error flagged)
@@ -264,10 +258,15 @@ func (e entry) Quarantine() error {
 		if rErr := os.Remove(e.f.Name()); rErr != nil {
 			return err // Error from rename is best thing to return
 		}
-		return fmt.Errorf("rename failed so file deleted: %w", err)
+		return e.syncAfterChange(fmt.Errorf("rename failed so file deleted: %w", err))
 	}
-	if cErr != nil {
-		return cErr
+	return e.syncAfterChange(cErr)
+}
+
+// Preserve the original operation error when directory sync succeeds or is disabled.
+func (e entry) syncAfterChange(err error) error {
+	if syncErr := e.syncDirectory(); syncErr != nil {
+		return errors.Join(err, syncErr)
 	}
-	return nil
+	return err
 }
