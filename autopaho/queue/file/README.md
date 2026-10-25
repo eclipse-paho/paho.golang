@@ -47,20 +47,21 @@ if err != nil {
 
 Durable mode syncs each temporary file before closing and renaming it, then syncs the queue directory before `Enqueue` 
 returns successfully. It also syncs directory changes made by `Remove` and `Quarantine`, including the deletion fallback 
-when a quarantine rename fails. Initialization syncs the queue directory and its ancestors up to the filesystem root, 
-including on retries after failed initialization. This requires permission to open and sync those directories. Errors 
-are returned instead of silently disabling durability.
+when a quarantine rename fails. Initialization syncs the queue directory, including on retries after failed
+initialization. On Windows, durable mode requires a local NTFS volume and permission to open the queue directory for
+writing; it relies on the NTFS directory-structure flush. Other platforms also sync the ancestors up to the filesystem
+root. Errors are returned instead of silently disabling durability.
 
 If syncing a file fails, cleanup attempts to remove the temporary file and no entry is published. If the rename succeeds
-ut directory sync fails, `Enqueue` returns an error matching `file.ErrDurabilityUncertain` (check with `errors.Is`). The 
+but directory sync fails, `Enqueue` returns an error matching `file.ErrDurabilityUncertain` (check with `errors.Is`). The
 entry remains available to consumers, but its survival across a power failure is uncertain. Retrying that enqueue can 
 create a duplicate. The same error signals a completed removal or quarantine whose directory sync failed. The underlying 
 error is also wrapped.
 
 This mode can significantly reduce throughput. It requires an OS/filesystem that supports directory sync and storage 
 that honors sync requests; it cannot protect against filesystem corruption or hardware that falsely reports completed 
-writes. The file and directory sync requirements are described in the 
-[Linux fsync documentation](https://man7.org/linux/man-pages/man2/fsync.2.html). 
+writes. See the [Linux fsync documentation](https://man7.org/linux/man-pages/man2/fsync.2.html) and Microsoft's
+[NTFS flush behavior](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fsa/0de7dc40-9627-437e-a4df-c4696cdc3d02).
 Existing entries written without durable mode are not retroactively synced. The on-disk format is unchanged, so either 
 mode can reopen the same queue. Only one queue instance may own a directory/prefix/extension namespace at a time.
 

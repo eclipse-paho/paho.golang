@@ -22,6 +22,7 @@ import (
 // WithDurable syncs directory changes made by Put, Delete, Quarantine, Reset, and startup recovery. Replacements are
 // durably published before older versions are removed. This can significantly reduce throughput and
 // requires an OS/filesystem and storage that honor file and directory Sync.
+// On Windows it requires NTFS and write access to the store directory.
 func WithDurable() Option {
 	return func(o *options) {
 		o.durable = true
@@ -53,7 +54,7 @@ func syncDirectory(path string, syncFile func(*os.File) error) error {
 	if syncFile == nil {
 		return nil
 	}
-	f, err := os.Open(path)
+	f, err := openDirectoryForSync(path)
 	if err != nil {
 		return fmt.Errorf("open store directory for sync: %w", err)
 	}
@@ -71,7 +72,8 @@ func makeStoreDirectory(path string, syncFile func(*os.File) error) error {
 	if syncFile == nil {
 		return nil
 	}
-	// Sync existing ancestors too: they may come from a failed initialization.
+	// NTFS flushes the directory structure with the leaf. Other platforms need
+	// existing ancestors synced too: they may come from a failed initialization.
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return err
@@ -83,6 +85,9 @@ func makeStoreDirectory(path string, syncFile func(*os.File) error) error {
 	for {
 		if err := syncDirectory(current, syncFile); err != nil {
 			return err
+		}
+		if !syncParentDirectories {
+			return nil
 		}
 		parent := filepath.Dir(current)
 		if parent == current {

@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -29,7 +30,13 @@ func TestDurableQueueFilesystem(t *testing.T) {
 	opts := []Option{WithDurable()}
 	// Directory sync is not supported on every platform/filesystem. Check the OS
 	// directly, then require the public constructor to report that limitation.
-	f, err := os.Open(dir)
+	f, err := openDirectoryForSync(dir)
+	if errors.Is(err, errors.ErrUnsupported) {
+		if q, err := New(dir, "q-", ".que", opts...); q != nil || !errors.Is(err, errors.ErrUnsupported) {
+			t.Fatalf("accepted unsupported filesystem: queue=%v, error=%v", q, err)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +334,7 @@ func TestDurableDirectoryCreation(t *testing.T) {
 	var want []string
 	for current := resolved; ; current = filepath.Dir(current) {
 		want = append(want, current)
-		if filepath.Dir(current) == current {
+		if runtime.GOOS == "windows" || filepath.Dir(current) == current {
 			break
 		}
 	}
@@ -381,6 +388,12 @@ func TestDurableDirectoryThroughSymlink(t *testing.T) {
 	resolved, err := filepath.EvalSymlinks(target)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		if len(calls) != 1 || calls[0] != filepath.Join(resolved, "queue") {
+			t.Fatalf("did not flush the actual NTFS directory: %v", calls)
+		}
+		return
 	}
 	if len(calls) < 2 || calls[0] != filepath.Join(resolved, "queue") || calls[1] != resolved {
 		t.Fatalf("did not sync directory in its actual parent: %v", calls)

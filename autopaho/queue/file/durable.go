@@ -26,6 +26,7 @@ import (
 // Entry removal and quarantine also sync the directory.
 // WARNING: This can significantly reduce throughput and requires filesystem support for directory sync.
 // Durability depends on the OS and storage honoring Sync.
+// On Windows it requires NTFS and write access to the queue directory.
 func WithDurable() Option {
 	return func(o *options) {
 		o.durable = true
@@ -49,7 +50,7 @@ func syncDirectory(path string, syncFile func(*os.File) error) error {
 	if syncFile == nil {
 		return nil
 	}
-	f, err := os.Open(path)
+	f, err := openDirectoryForSync(path)
 	if err != nil {
 		return fmt.Errorf("open queue directory for sync: %w", err)
 	}
@@ -68,9 +69,9 @@ func makeQueueDirectory(path string, syncFile func(*os.File) error) error {
 		return nil
 	}
 
-	// Persist the path from the leaf up to the root. Include existing ancestors:
-	// they may have been created by an earlier constructor whose sync failed.
-	// Stopping at the first existing directory would leave retries unsafe.
+	// Persist the path, including retries after failed initialization. NTFS
+	// flushes the directory structure with the leaf; other platforms need each
+	// ancestor synced, including those left by an earlier failed attempt.
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return err
@@ -82,6 +83,9 @@ func makeQueueDirectory(path string, syncFile func(*os.File) error) error {
 	for {
 		if err := syncDirectory(current, syncFile); err != nil {
 			return err
+		}
+		if !syncParentDirectories {
+			return nil
 		}
 		parent := filepath.Dir(current)
 		if parent == current {

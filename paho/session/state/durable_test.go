@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"testing"
 
@@ -224,23 +223,12 @@ func TestSessionRecoveryStopsOnStoreFailure(t *testing.T) {
 func TestDurableSessionStoresRestart(t *testing.T) {
 	dir := t.TempDir()
 	opts := []storefile.Option{storefile.WithDurable()}
-	f, err := os.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	syncErr := f.Sync()
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if syncErr != nil {
-		if s, err := storefile.New(dir, "client-", ".pkt", opts...); err == nil || s != nil {
-			t.Fatalf("durable store accepted unsupported directory sync: %v, %v", s, err)
-		}
-		return
-	}
 	openStores := func() (*storefile.Store, *storefile.Store) {
 		t.Helper()
 		client, err := storefile.New(dir, "client-", ".pkt", opts...)
+		if errors.Is(err, errors.ErrUnsupported) {
+			t.Skipf("durable stores are unsupported on this filesystem: %v", err)
+		}
 		if err != nil {
 			t.Fatal(err)
 		}

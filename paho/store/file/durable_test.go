@@ -65,7 +65,13 @@ func TestStoreDefaultStillSyncsFiles(t *testing.T) {
 func TestStoreWithDurableSyncsDirectories(t *testing.T) {
 	dir := t.TempDir()
 	opts := []Option{WithDurable()}
-	f, err := os.Open(dir)
+	f, err := openDirectoryForSync(dir)
+	if errors.Is(err, errors.ErrUnsupported) {
+		if s, err := New(dir, "p", ".pkt", opts...); s != nil || !errors.Is(err, errors.ErrUnsupported) {
+			t.Fatalf("accepted unsupported filesystem: store=%v, error=%v", s, err)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
