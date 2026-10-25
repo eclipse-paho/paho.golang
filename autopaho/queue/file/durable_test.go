@@ -124,6 +124,8 @@ func TestDurableEnqueueSyncOrder(t *testing.T) {
 	var handles []*os.File
 	q.syncFile = func(f *os.File) error {
 		handles = append(handles, f)
+		// Ensure an assertion failure in this callback cannot leak the handle.
+		t.Cleanup(func() { _ = f.Close() })
 		info, err := f.Stat()
 		if err != nil {
 			t.Fatal(err)
@@ -137,7 +139,8 @@ func TestDurableEnqueueSyncOrder(t *testing.T) {
 			if len(entries) != 1 {
 				t.Fatalf("directory sync before publication: %v", entries)
 			}
-			if _, err := handles[0].Stat(); !errors.Is(err, os.ErrClosed) {
+			// Read checks closure portably; Stat may return a native invalid-handle error on Windows.
+			if _, err := handles[0].Read(nil); !errors.Is(err, os.ErrClosed) {
 				t.Fatalf("entry file not closed before directory sync: %v", err)
 			}
 		} else {
@@ -169,7 +172,7 @@ func TestDurableEnqueueSyncOrder(t *testing.T) {
 		t.Fatal("consumer not notified after successful enqueue")
 	}
 	for _, f := range handles {
-		if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
+		if _, err := f.Read(nil); !errors.Is(err, os.ErrClosed) {
 			t.Fatalf("sync handle left open: %v", err)
 		}
 	}
@@ -190,6 +193,7 @@ func TestDurableEnqueueSyncFailure(t *testing.T) {
 			var handles []*os.File
 			q.syncFile = func(f *os.File) error {
 				handles = append(handles, f)
+				t.Cleanup(func() { _ = f.Close() })
 				info, err := f.Stat()
 				if err != nil {
 					t.Fatal(err)
@@ -205,7 +209,7 @@ func TestDurableEnqueueSyncFailure(t *testing.T) {
 				t.Fatalf("wrong sync error: %v", err)
 			}
 			for _, f := range handles {
-				if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
+				if _, err := f.Read(nil); !errors.Is(err, os.ErrClosed) {
 					t.Fatalf("failed sync leaked handle: %v", err)
 				}
 			}
@@ -310,6 +314,7 @@ func TestDurableDirectoryCreation(t *testing.T) {
 	q, err := newQueue(dir, "q-", ".que", func(f *os.File) error {
 		calls = append(calls, f.Name())
 		handles = append(handles, f)
+		t.Cleanup(func() { _ = f.Close() })
 		return nil
 	})
 	if err != nil || q == nil {
@@ -330,7 +335,7 @@ func TestDurableDirectoryCreation(t *testing.T) {
 		t.Fatalf("synced directories %v, want %v", calls, want)
 	}
 	for _, f := range handles {
-		if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
+		if _, err := f.Read(nil); !errors.Is(err, os.ErrClosed) {
 			t.Fatalf("directory creation leaked handle: %v", err)
 		}
 	}

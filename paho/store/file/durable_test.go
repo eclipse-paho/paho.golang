@@ -120,6 +120,8 @@ func TestDurableReplacementSyncOrder(t *testing.T) {
 	var handles []*os.File
 	s.syncFile = func(f *os.File) error {
 		handles = append(handles, f)
+		// Ensure an assertion failure in this callback cannot leak the handle.
+		t.Cleanup(func() { _ = f.Close() })
 		info, err := f.Stat()
 		if err != nil {
 			t.Fatal(err)
@@ -132,7 +134,8 @@ func TestDurableReplacementSyncOrder(t *testing.T) {
 			}
 		} else {
 			calls = append(calls, "directory")
-			if _, err := handles[0].Stat(); !errors.Is(err, os.ErrClosed) {
+			// Read checks closure portably; Stat may return a native invalid-handle error on Windows.
+			if _, err := handles[0].Read(nil); !errors.Is(err, os.ErrClosed) {
 				t.Fatalf("file not closed before publication: %v", err)
 			}
 			data, err := os.ReadFile(filepath.Join(s.path, s.packets[7].Name))
@@ -156,7 +159,7 @@ func TestDurableReplacementSyncOrder(t *testing.T) {
 		t.Fatalf("sync order=%v", calls)
 	}
 	for _, f := range handles {
-		if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
+		if _, err := f.Read(nil); !errors.Is(err, os.ErrClosed) {
 			t.Fatalf("sync leaked handle: %v", err)
 		}
 	}

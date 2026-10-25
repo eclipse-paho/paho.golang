@@ -171,6 +171,7 @@ func TestFailedRenameCleansTemporaryFile(t *testing.T) {
 	var opened *os.File
 	err := writeEntry(dir, name, func(w io.Writer) error {
 		opened = w.(*os.File)
+		t.Cleanup(func() { _ = opened.Close() })
 		if _, err := io.WriteString(w, "complete"); err != nil {
 			return err
 		}
@@ -183,7 +184,8 @@ func TestFailedRenameCleansTemporaryFile(t *testing.T) {
 	if opened == nil {
 		t.Fatalf("failed before writing: %v", err)
 	}
-	if _, err := opened.Stat(); !errors.Is(err, os.ErrClosed) {
+	// Read checks closure portably; Stat may return a native invalid-handle error on Windows.
+	if _, err := opened.Read(nil); !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("temporary file was not closed: %v", err)
 	}
 	files, err := os.ReadDir(dir)
