@@ -19,8 +19,10 @@ import (
 	"testing"
 )
 
-// Exercise the real OS calls. In particular, an os.Open handle on Windows NTFS
+// TestDirectorySync exercises real directory syncs after creating, renaming, and
+// removing a file, and checks handle closure. An os.Open handle on Windows NTFS
 // would fail Sync with ERROR_ACCESS_DENIED instead of flushing the directory.
+// Intentionally duplicated in autopaho/queue/file/directorysync_test.go; keep both copies in sync.
 func TestDirectorySync(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "new", "directory")
 	if err := os.MkdirAll(dir, 0700); err != nil {

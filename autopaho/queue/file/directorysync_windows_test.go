@@ -18,6 +18,9 @@ import (
 	"testing"
 )
 
+// TestUnsupportedFilesystemsCloseHandle checks that rejecting a non-NTFS volume
+// or failing the filesystem query returns an error and closes the opened handle.
+// Intentionally duplicated in paho/store/file/directorysync_windows_test.go; keep both copies in sync.
 func TestUnsupportedFilesystemsCloseHandle(t *testing.T) {
 	failure := errors.New("filesystem query failed")
 	for _, tc := range []struct {
@@ -50,6 +53,9 @@ func TestUnsupportedFilesystemsCloseHandle(t *testing.T) {
 	}
 }
 
+// TestFilesystemQueryOnClosedHandle checks that querying a closed directory
+// handle returns an error without reporting a filesystem name.
+// Intentionally duplicated in paho/store/file/directorysync_windows_test.go; keep both copies in sync.
 func TestFilesystemQueryOnClosedHandle(t *testing.T) {
 	f, err := os.Open(t.TempDir())
 	if err != nil {
