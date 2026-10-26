@@ -25,12 +25,24 @@ At startup, the folder is scanned to determine the next sequence number is. Gaps
 The counter is not reset while the instance is running; reopening an empty namespace may start again at 1. Exhausting the
 uint64 counter returns an error instead of wrapping.
 
-An enqueue writes to a temporary file, closes it, then renames it into place. A failed read or write does not publish a 
-partial entry. Incomplete temporary files left by a process crash are ignored and left on disk.
+By default, an enqueue writes directly to its final filename, using exclusive creation so an existing entry cannot be
+overwritten. This avoids a separate existence check and rename on each enqueue. The queue holds its mutex until the
+write finishes, so `Peek` cannot expose an entry while it is being written. If reading the input, writing, or closing
+fails, enqueue attempts to remove the new file; a process crash or failed cleanup can leave a partial entry.
+
+AutoPaho decodes each queued MQTT packet before sending it. A truncated packet produces a decode error and is quarantined
+by appending `.CORRUPT`; quarantined files are excluded from subsequent queue reads, including after restart. If the
+quarantine rename fails, deletion is attempted instead. If both operations fail, the entry may be processed repeatedly.
+This detects ordinary truncation, not all corruption: a full-length packet with damaged payload bytes may still decode
+successfully. The queue itself is byte-oriented; applications consuming it directly must handle invalid entries.
+
+With durable mode enabled, an enqueue writes and syncs a temporary file before closing and renaming it into place.
+Incomplete temporary files left by a process crash are ignored and left on disk. Both modes use the same final filenames
+and remain compatible when reopening an existing queue.
 
 ## Durability
 
-`New` keeps the existing behavior: writes are not synced, so a successful enqueue does not guarantee that the message 
+By default, writes are not synced, so a successful enqueue does not guarantee that the message
 will survive a power failure or OS crash. 
 
 To enable durable mode use:

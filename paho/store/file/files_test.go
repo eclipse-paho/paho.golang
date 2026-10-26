@@ -24,6 +24,8 @@ import (
 	"time"
 )
 
+// TestSequenceFilename checks fixed-width sequence formatting, optional packet
+// keys, and prefix/extension handling, including the largest uint64 sequence.
 // Intentionally duplicated in autopaho/queue/file/files_test.go; keep both copies in sync.
 func TestSequenceFilename(t *testing.T) {
 	for _, tc := range []struct {
@@ -43,6 +45,9 @@ func TestSequenceFilename(t *testing.T) {
 	}
 }
 
+// TestReadMixedFormats checks that legacy entries precede sequenced entries in
+// their respective orders, while ignored files do not become live entries and
+// quarantined sequences still advance the recovered counter.
 // Intentionally duplicated in autopaho/queue/file/files_test.go; keep both copies in sync.
 func TestReadMixedFormats(t *testing.T) {
 	for _, ext := range []string{".pkt", ""} {
@@ -85,6 +90,8 @@ func TestReadMixedFormats(t *testing.T) {
 	}
 }
 
+// TestRejectInvalidSequences checks that malformed filenames and duplicate live
+// sequences fail recovery rather than silently producing an ambiguous order.
 // Intentionally duplicated in autopaho/queue/file/files_test.go; keep both copies in sync.
 func TestRejectInvalidSequences(t *testing.T) {
 	for _, body := range []string{"s1", "s00000000000000000000", "s18446744073709551616", "s00000000000000000001-", "s00000000000000000001-abc"} {
@@ -109,6 +116,8 @@ func TestRejectInvalidSequences(t *testing.T) {
 	}
 }
 
+// TestReadEntriesIgnoresQuarantinedDuplicates checks that quarantined files do
+// not conflict with live sequences but still reserve their sequence numbers.
 // Intentionally duplicated in autopaho/queue/file/files_test.go; keep both copies in sync.
 func TestReadEntriesIgnoresQuarantinedDuplicates(t *testing.T) {
 	dir := t.TempDir()
@@ -128,6 +137,10 @@ func TestReadEntriesIgnoresQuarantinedDuplicates(t *testing.T) {
 	}
 }
 
+// TestWritePublicationAndFailure checks that incomplete writes stay hidden,
+// failed writes are cleaned up, and an existing sequence cannot be overwritten.
+// Also exercised in autopaho/queue/file/files_test.go, with different visibility
+// expectations: only the default queue writes directly to its final filename.
 func TestWritePublicationAndFailure(t *testing.T) {
 	for _, sync := range []func(*os.File) error{nil, (*os.File).Sync} {
 		dir := t.TempDir()
@@ -164,7 +177,10 @@ func TestWritePublicationAndFailure(t *testing.T) {
 	}
 }
 
-// Intentionally duplicated in autopaho/queue/file/files_test.go; keep both copies in sync.
+// TestFailedRenameCleansTemporaryFile checks that a failed publication closes
+// and removes the temporary file without altering the blocking destination.
+// Also exercised by TestDurableFailedRenameCleansTemporaryFile in
+// autopaho/queue/file/files_test.go; that variant enables syncing to use rename.
 func TestFailedRenameCleansTemporaryFile(t *testing.T) {
 	dir := t.TempDir()
 	name := sequenceFilename("p", ".pkt", 1, "")
@@ -194,6 +210,8 @@ func TestFailedRenameCleansTemporaryFile(t *testing.T) {
 	}
 }
 
+// TestSequenceExhaustion checks that the final uint64 sequence is usable and
+// subsequent allocation fails without wrapping or changing the counter.
 // Intentionally duplicated in autopaho/queue/file/files_test.go; keep both copies in sync.
 func TestSequenceExhaustion(t *testing.T) {
 	last := uint64(math.MaxUint64 - 1)
@@ -205,6 +223,8 @@ func TestSequenceExhaustion(t *testing.T) {
 	}
 }
 
+// TestProbePreservesFilesAndChecksLength checks that the constructor's filename
+// probe preserves existing data, rejects overlong names, and leaves no probe files.
 // Intentionally duplicated in autopaho/queue/file/files_test.go; keep both copies in sync.
 func TestProbePreservesFilesAndChecksLength(t *testing.T) {
 	dir := t.TempDir()

@@ -51,6 +51,8 @@ func checkData(t *testing.T, s *Store, id uint16, want string) {
 	}
 }
 
+// TestPacketIdentifierFilenamePadding checks five-digit packet IDs across digit
+// boundaries and verifies that the resulting filenames can be recovered on reopen.
 func TestPacketIdentifierFilenamePadding(t *testing.T) {
 	dir := t.TempDir()
 	s, err := New(dir, "p", ".pkt")
@@ -83,6 +85,9 @@ func TestPacketIdentifierFilenamePadding(t *testing.T) {
 	}
 }
 
+// TestSequenceOrderAndReplacement checks that replacement and packet-ID reuse move
+// an entry to the end, with the latest packet and order surviving timestamp ties,
+// backwards timestamps, and reopening.
 func TestSequenceOrderAndReplacement(t *testing.T) {
 	for _, ext := range []string{".pkt", ""} {
 		t.Run(ext, func(t *testing.T) {
@@ -147,6 +152,9 @@ func TestSequenceOrderAndReplacement(t *testing.T) {
 	}
 }
 
+// TestLegacyAndInterruptedReplacement checks recovery with legacy entries and
+// multiple versions of one packet, as left by interrupted replacement cleanup.
+// Deleting, quarantining, or resetting must not resurrect an obsolete version on reopen.
 func TestLegacyAndInterruptedReplacement(t *testing.T) {
 	for _, operation := range []string{"delete", "quarantine", "reset"} {
 		t.Run(operation, func(t *testing.T) {
@@ -216,6 +224,8 @@ func (failingWriter) WriteTo(w io.Writer) (int64, error) {
 	return int64(n), io.ErrUnexpectedEOF
 }
 
+// TestFailedReplacementPreservesPacket checks that encoding failure and sequence
+// exhaustion leave the previously stored packet intact, including after reopening.
 func TestFailedReplacementPreservesPacket(t *testing.T) {
 	dir := t.TempDir()
 	s, err := New(dir, "", "")
@@ -249,6 +259,8 @@ func TestFailedReplacementPreservesPacket(t *testing.T) {
 	checkIDs(t, s, []uint16{1, 2})
 }
 
+// TestObsoleteCleanupFailurePreservesNewest checks that Delete, Quarantine, and
+// Reset preserve the latest packet when obsolete versions cannot be removed.
 func TestObsoleteCleanupFailurePreservesNewest(t *testing.T) {
 	dir := t.TempDir()
 	s, err := New(dir, "p", ".pkt")
@@ -275,6 +287,8 @@ func TestObsoleteCleanupFailurePreservesNewest(t *testing.T) {
 	}
 }
 
+// TestConcurrentStoreWrites checks that concurrent puts retain every packet and
+// recover the same sequence order and contents after reopening.
 func TestConcurrentStoreWrites(t *testing.T) {
 	dir := t.TempDir()
 	s, err := New(dir, "p", ".pkt")

@@ -142,9 +142,11 @@ func (q *Queue) WaitForEmpty() chan struct{} {
 	return c
 }
 
-// Enqueue adds an item to the queue. In durable mode, it syncs the file before
-// publishing it and the directory afterwards. ErrDurabilityUncertain means the
-// entry was published but directory sync failed; retrying can enqueue a duplicate.
+// Enqueue adds an item to the queue. By default it writes directly to a new file;
+// a crash can leave a partial entry. Peek waits for writes to finish, and failed
+// writes attempt to remove the entry. In durable mode, it syncs a temporary file
+// before renaming it into place and syncing the directory. ErrDurabilityUncertain
+// means the entry was published but directory sync failed; retrying can enqueue a duplicate.
 func (q *Queue) Enqueue(p io.Reader) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -153,7 +155,7 @@ func (q *Queue) Enqueue(p io.Reader) error {
 		return err
 	}
 	err = q.syncDirectory()
-	// A rename remains visible even if the subsequent directory sync failed.
+	// A completed entry remains visible even if the subsequent directory sync failed.
 	if q.queueEmpty {
 		q.queueEmpty = false
 		for _, c := range q.waiting {

@@ -8,9 +8,11 @@
  * and the Eclipse Distribution License at http://www.eclipse.org/org/documents/edl-v10.php.
  *
  * AI Disclosure: This file was largely generated with OpenAI GPT-6 via Codex.
+ * The non-durable direct-write path was generated with OpenAI GPT-5 via Codex.
  * AI-generated portions are made available under CC0-1.0.
  * SPDX-License-Identifier: (EPL-2.0 OR BSD-3-Clause) AND CC0-1.0
  * Assisted-by: OpenAI GPT-6
+ * Assisted-by: OpenAI GPT-5
  */
 
 package file
@@ -29,7 +31,8 @@ import (
 )
 
 // These helpers stay in this package so it can be copied and customized without importing another persistence package.
-// If you make changes, please repeat them in `paho/store/file/files.go`.
+// Except for writeEntry, they are duplicated in `paho/store/file/files.go`; keep both copies in sync.
+// writeEntry intentionally differs: only durable queue writes use temporary files, while the session store always does.
 
 // diskEntry describes a committed file. Sequence zero denotes the legacy format.
 type diskEntry struct {
@@ -191,22 +194,32 @@ func probeDirectory(path, prefix, extension, key string) error {
 	return os.Remove(name)
 }
 
-// writeEntry publishes a completed file with a rename. If syncFile is non-nil,
-// it syncs the contents before publication. The caller handles directory sync.
+// writeEntry writes directly to an exclusively created final filename by default.
+// The caller must prevent readers from opening it until this returns. If syncFile is non-nil, it instead
+// writes and syncs a temporary file before renaming it; the caller handles directory sync.
+// Unlike this queue helper, paho/store/file/files.go always uses a temporary file
+// so an incomplete session replacement cannot supersede the previous packet on recovery.
 func writeEntry(path, name string, write func(io.Writer) error, syncFile func(*os.File) error) error {
 	final := filepath.Join(path, name)
-	if _, err := os.Lstat(final); err == nil {
-		return fmt.Errorf("sequence filename already exists: %w", os.ErrExist)
-	} else if !os.IsNotExist(err) {
-		return err
+	var f *os.File
+	var err error
+	if syncFile == nil {
+		// O_EXCL checks for collisions as part of creation, without a separate Lstat.
+		f, err = os.OpenFile(final, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	} else {
+		if _, err := os.Lstat(final); err == nil {
+			return fmt.Errorf("sequence filename already exists: %w", os.ErrExist)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		f, err = temp(path, name)
 	}
-	f, err := temp(path, name)
 	if err != nil {
 		return err
 	}
-	published := false
+	complete := false
 	defer func() {
-		if !published {
+		if !complete {
 			_ = os.Remove(f.Name())
 		}
 	}()
@@ -223,9 +236,11 @@ func writeEntry(path, name string, write func(io.Writer) error, syncFile func(*o
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(f.Name(), final); err != nil {
-		return err
+	if syncFile != nil {
+		if err := os.Rename(f.Name(), final); err != nil {
+			return err
+		}
 	}
-	published = true
+	complete = true
 	return nil
 }

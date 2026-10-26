@@ -29,7 +29,8 @@ import (
 )
 
 // These helpers stay in this package so it can be copied and customized without importing another persistence package.
-// If you make changes, please repeat them in `autopaho/queue/file/files.go`.
+// Except for writeEntry, they are duplicated in `autopaho/queue/file/files.go`; keep both copies in sync.
+// writeEntry intentionally differs: the session store always uses temporary files, unlike non-durable queue writes.
 
 // diskEntry describes a committed file. Sequence zero denotes the legacy format.
 type diskEntry struct {
@@ -193,6 +194,8 @@ func probeDirectory(path, prefix, extension, key string) error {
 
 // writeEntry publishes a completed file with a rename. If syncFile is non-nil,
 // it syncs the contents before publication. The caller handles directory sync.
+// Unlike autopaho/queue/file/files.go, this always uses a temporary file so an
+// incomplete replacement cannot supersede the previous packet during recovery.
 func writeEntry(path, name string, write func(io.Writer) error, syncFile func(*os.File) error) error {
 	final := filepath.Join(path, name)
 	if _, err := os.Lstat(final); err == nil {

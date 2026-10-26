@@ -49,6 +49,8 @@ func take(t *testing.T, q *Queue, want string) {
 	}
 }
 
+// TestSequenceOrderAfterRestart checks FIFO order across reopening despite equal
+// or backwards timestamps, and verifies that draining a live queue does not reset its sequence.
 func TestSequenceOrderAfterRestart(t *testing.T) {
 	for _, ext := range []string{".que", ""} {
 		t.Run(ext, func(t *testing.T) {
@@ -101,6 +103,8 @@ func TestSequenceOrderAfterRestart(t *testing.T) {
 	}
 }
 
+// TestLegacyQueueWithSequences checks that legacy entries retain timestamp/name
+// order and are consumed before newly sequenced entries, including after reopening.
 func TestLegacyQueueWithSequences(t *testing.T) {
 	dir := t.TempDir()
 	for _, suffix := range []string{"9", "10", "2"} {
@@ -139,6 +143,8 @@ func (brokenReader) Read(p []byte) (int, error) {
 	return copy(p, "partial"), io.ErrUnexpectedEOF
 }
 
+// TestFailedEnqueueAndExhaustion checks that a failed write does not notify consumers
+// and that quarantining the final sequence cannot allow counter wraparound after restart.
 func TestFailedEnqueueAndExhaustion(t *testing.T) {
 	dir := t.TempDir()
 	q, err := New(dir, "", "")
@@ -177,6 +183,8 @@ func TestFailedEnqueueAndExhaustion(t *testing.T) {
 	}
 }
 
+// TestConcurrentEnqueues checks that concurrent writers receive distinct sequences
+// and retain every payload exactly once.
 func TestConcurrentEnqueues(t *testing.T) {
 	dir := t.TempDir()
 	q, err := New(dir, "", ".que")

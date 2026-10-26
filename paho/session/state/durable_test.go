@@ -63,6 +63,9 @@ type persistenceCheckingWriter func([]byte) (int, error)
 
 func (w persistenceCheckingWriter) Write(b []byte) (int, error) { return w(b) }
 
+// TestInboundQoS2PersistsBeforeAcknowledging checks that PUBREC waits for stored
+// state and PUBCOMP waits for its deletion. Persistence failures must neither send
+// the acknowledgement nor advance the in-memory transaction.
 func TestInboundQoS2PersistsBeforeAcknowledging(t *testing.T) {
 	store := &persistenceErrorStore{Store: memory.New()}
 	s := New(memory.New(), store)
@@ -122,6 +125,9 @@ func TestInboundQoS2PersistsBeforeAcknowledging(t *testing.T) {
 	}
 }
 
+// TestFinalAcknowledgementWaitsForStoreDeletion checks that PUBACK, PUBCOMP, and
+// negative PUBREC processing retain the packet ID and withhold completion until
+// deleting the persisted packet succeeds.
 func TestFinalAcknowledgementWaitsForStoreDeletion(t *testing.T) {
 	for _, kind := range []byte{packets.PUBACK, packets.PUBCOMP, packets.PUBREC} {
 		t.Run(fmt.Sprint(kind), func(t *testing.T) {
@@ -186,6 +192,9 @@ func TestFinalAcknowledgementWaitsForStoreDeletion(t *testing.T) {
 	}
 }
 
+// TestSessionRecoveryStopsOnStoreFailure checks that client and server recovery
+// propagate read or quarantine failures and leave the session disconnected so
+// packet IDs cannot be allocated from an incompletely recovered inventory.
 func TestSessionRecoveryStopsOnStoreFailure(t *testing.T) {
 	for _, direction := range []string{"client", "server"} {
 		for _, operation := range []string{"get", "quarantine unreadable", "quarantine wrong type"} {
@@ -220,6 +229,9 @@ func TestSessionRecoveryStopsOnStoreFailure(t *testing.T) {
 	}
 }
 
+// TestDurableSessionStoresRestart checks that reopened file stores restore outbound
+// PUBREL and inbound PUBREC state without redelivering an acknowledged QoS 2 publish,
+// and that completed exchanges stay removed across a further reopen.
 func TestDurableSessionStoresRestart(t *testing.T) {
 	dir := t.TempDir()
 	opts := []storefile.Option{storefile.WithDurable()}

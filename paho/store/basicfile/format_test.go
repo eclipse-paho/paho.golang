@@ -69,6 +69,8 @@ func TestBasicfileRejectsSequences(t *testing.T) {
 	}
 }
 
+// TestCheckLegacyNamespace checks that the downgrade safeguard respects namespace
+// matching, ignores unrelated files and directories, and reports directory read errors.
 // Intentionally duplicated in autopaho/queue/basicfile/format_test.go; keep both copies in sync.
 func TestCheckLegacyNamespace(t *testing.T) {
 	for _, tt := range []struct {

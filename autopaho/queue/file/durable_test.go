@@ -25,6 +25,8 @@ import (
 	"github.com/eclipse/paho.golang/autopaho/queue"
 )
 
+// TestDurableQueueFilesystem exercises enqueue, reopen, quarantine, and removal
+// using real filesystem syncs, and checks that unsupported durability is reported.
 func TestDurableQueueFilesystem(t *testing.T) {
 	dir := t.TempDir()
 	opts := []Option{WithDurable()}
@@ -105,6 +107,8 @@ func TestDurableQueueFilesystem(t *testing.T) {
 	}
 }
 
+// TestQueueDefaultDoesNotSync checks that omitted or empty options preserve the
+// non-syncing default and still allow entries to be enqueued and consumed.
 func TestQueueDefaultDoesNotSync(t *testing.T) {
 	for _, opts := range [][]Option{nil, {}} {
 		q, err := New(t.TempDir(), "", "", opts...)
@@ -121,6 +125,8 @@ func TestQueueDefaultDoesNotSync(t *testing.T) {
 	}
 }
 
+// TestDurableEnqueueSyncOrder checks that a complete file is synced and closed
+// before publication, then the directory is synced before consumers are notified.
 func TestDurableEnqueueSyncOrder(t *testing.T) {
 	q, err := New(t.TempDir(), "q-", ".que")
 	if err != nil {
@@ -185,6 +191,9 @@ func TestDurableEnqueueSyncOrder(t *testing.T) {
 	}
 }
 
+// TestDurableEnqueueSyncFailure distinguishes file-sync failure, which removes the
+// unpublished entry, from directory-sync failure, which leaves a consumable entry
+// and returns ErrDurabilityUncertain. Both paths must close their handles.
 func TestDurableEnqueueSyncFailure(t *testing.T) {
 	for _, failDirectory := range []bool{false, true} {
 		name := "file"
@@ -256,6 +265,9 @@ func TestDurableEnqueueSyncFailure(t *testing.T) {
 	}
 }
 
+// TestDurableEntryChangesSyncDirectory checks that removal, quarantine, and its
+// deletion fallback sync the directory after changing it and report uncertain
+// durability if that sync fails, without making the entry live again.
 func TestDurableEntryChangesSyncDirectory(t *testing.T) {
 	for _, operation := range []string{"remove", "quarantine", "quarantine fallback"} {
 		for _, failSync := range []bool{false, true} {
@@ -313,6 +325,9 @@ func TestDurableEntryChangesSyncDirectory(t *testing.T) {
 	}
 }
 
+// TestDurableDirectoryCreation checks the platform-required initialization syncs,
+// handle closure, and error propagation. Retrying initialization must repeat the
+// syncs even when the first attempt already created the directories.
 func TestDurableDirectoryCreation(t *testing.T) {
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "new", "queue")
@@ -367,6 +382,8 @@ func TestDurableDirectoryCreation(t *testing.T) {
 	}
 }
 
+// TestDurableDirectoryThroughSymlink checks that initialization syncs the resolved
+// queue directory and, where required, its actual parent rather than the symlink's parent.
 func TestDurableDirectoryThroughSymlink(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(base, "target")

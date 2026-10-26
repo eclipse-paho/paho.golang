@@ -5,9 +5,11 @@
  * Eclipse Public License v2.0 (https://www.eclipse.org/legal/epl-2.0/) and
  * Eclipse Distribution License v1.0 (http://www.eclipse.org/org/documents/edl-v10.php).
  * AI Disclosure: This file was largely generated with OpenAI GPT-6 via Codex.
+ * The direct-write regression tests were generated with OpenAI GPT-5 via Codex.
  * AI-generated portions are made available under CC0-1.0.
  * SPDX-License-Identifier: (EPL-2.0 OR BSD-3-Clause) AND CC0-1.0
  * Assisted-by: OpenAI GPT-6
+ * Assisted-by: OpenAI GPT-5
  */
 
 package file
@@ -24,6 +26,9 @@ import (
 	"time"
 )
 
+// TestReadMixedFormats checks that legacy entries precede sequenced entries in
+// their respective orders, while ignored files do not become live entries and
+// quarantined sequences still advance the recovered counter.
 // Intentionally duplicated in paho/store/file/files_test.go; keep both copies in sync.
 func TestReadMixedFormats(t *testing.T) {
 	for _, ext := range []string{".pkt", ""} {
@@ -66,6 +71,8 @@ func TestReadMixedFormats(t *testing.T) {
 	}
 }
 
+// TestRejectInvalidSequences checks that malformed filenames and duplicate live
+// sequences fail recovery rather than silently producing an ambiguous order.
 // Intentionally duplicated in paho/store/file/files_test.go; keep both copies in sync.
 func TestRejectInvalidSequences(t *testing.T) {
 	for _, body := range []string{"s1", "s00000000000000000000", "s18446744073709551616", "s00000000000000000001-", "s00000000000000000001-abc"} {
@@ -90,42 +97,90 @@ func TestRejectInvalidSequences(t *testing.T) {
 	}
 }
 
+// TestWritePublicationAndFailure checks filename visibility in direct and durable
+// modes, cleanup after write errors, and protection against overwriting an entry.
+// Adapted from paho/store/file/files_test.go: the default queue deliberately
+// exposes its final filename during the write, but the store never does.
 func TestWritePublicationAndFailure(t *testing.T) {
-	for _, sync := range []func(*os.File) error{nil, (*os.File).Sync} {
-		dir := t.TempDir()
-		name := sequenceFilename("", "", 1, "")
-		failure := errors.New("write failed")
-		err := writeEntry(dir, name, func(w io.Writer) error {
-			if _, err := w.Write([]byte("partial")); err != nil {
+	for _, tc := range []struct {
+		name     string
+		syncFile func(*os.File) error
+		visible  int
+	}{
+		{"direct", nil, 1},
+		{"durable", (*os.File).Sync, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			name := sequenceFilename("", "", 1, "")
+			failure := errors.New("write failed")
+			var opened *os.File
+			err := writeEntry(dir, name, func(w io.Writer) error {
+				opened = w.(*os.File)
+				t.Cleanup(func() { _ = opened.Close() })
+				if _, err := w.Write([]byte("partial")); err != nil {
+					t.Fatal(err)
+				}
+				entries, _, err := readEntries(dir, "", "")
+				if err != nil || len(entries) != tc.visible {
+					t.Fatalf("in-progress entries=%v, want %d: %v", entries, tc.visible, err)
+				}
+				if tc.visible != 0 && entries[0].Name != name {
+					t.Fatalf("not writing directly to the final filename: %v", entries)
+				}
+				return failure
+			}, tc.syncFile)
+			if !errors.Is(err, failure) {
+				t.Fatalf("want write error, got %v", err)
+			}
+			if _, err := opened.Read(nil); !errors.Is(err, os.ErrClosed) {
+				t.Fatalf("failed write left file open: %v", err)
+			}
+			files, err := os.ReadDir(dir)
+			if err != nil || len(files) != 0 {
+				t.Fatalf("failed write left files: %v, %v", files, err)
+			}
+			write := func(w io.Writer) error { _, err := io.WriteString(w, "complete"); return err }
+			if err := writeEntry(dir, name, write, tc.syncFile); err != nil {
 				t.Fatal(err)
 			}
-			entries, _, err := readEntries(dir, "", "")
-			if err != nil || len(entries) != 0 {
-				t.Fatalf("incomplete file visible: %v, %v", entries, err)
+			called := false
+			err = writeEntry(dir, name, func(w io.Writer) error {
+				called = true
+				_, err := io.WriteString(w, "replacement")
+				return err
+			}, tc.syncFile)
+			if !errors.Is(err, os.ErrExist) || called {
+				t.Fatalf("overwriting sequence was allowed: write called=%v, error=%v", called, err)
 			}
-			return failure
-		}, sync)
-		if !errors.Is(err, failure) {
-			t.Fatalf("want write error, got %v", err)
-		}
-		files, err := os.ReadDir(dir)
-		if err != nil || len(files) != 0 {
-			t.Fatalf("failed write left files: %v, %v", files, err)
-		}
-		write := func(w io.Writer) error { _, err := io.WriteString(w, "complete"); return err }
-		if err := writeEntry(dir, name, write, sync); err != nil {
-			t.Fatal(err)
-		}
-		if err := writeEntry(dir, name, write, sync); !errors.Is(err, os.ErrExist) {
-			t.Fatalf("overwriting sequence was allowed: %v", err)
-		}
-		got, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil || string(got) != "complete" {
-			t.Fatalf("committed data=%q, err=%v", got, err)
-		}
+			got, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil || string(got) != "complete" {
+				t.Fatalf("committed data=%q, err=%v", got, err)
+			}
+		})
 	}
 }
 
+// TestDirectWriteCloseFailureRemovesEntry checks that a close error is returned
+// and the directly created file is removed rather than left as a live queue entry.
+func TestDirectWriteCloseFailureRemovesEntry(t *testing.T) {
+	dir := t.TempDir()
+	name := sequenceFilename("", ".que", 1, "")
+	err := writeEntry(dir, name, func(w io.Writer) error {
+		// Closing early makes writeEntry's close fail after the write callback succeeds.
+		return w.(*os.File).Close()
+	}, nil)
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("want close error, got %v", err)
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil || len(files) != 0 {
+		t.Fatalf("failed close left files: %v, %v", files, err)
+	}
+}
+
+// TestSequenceExhaustion checks that the final uint64 sequence is usable and
+// subsequent allocation fails without wrapping or changing the counter.
 // Intentionally duplicated in paho/store/file/files_test.go; keep both copies in sync.
 func TestSequenceExhaustion(t *testing.T) {
 	last := uint64(math.MaxUint64 - 1)
@@ -137,6 +192,8 @@ func TestSequenceExhaustion(t *testing.T) {
 	}
 }
 
+// TestProbePreservesFilesAndChecksLength checks that the constructor's filename
+// probe preserves existing data, rejects overlong names, and leaves no probe files.
 // Intentionally duplicated in paho/store/file/files_test.go; keep both copies in sync.
 func TestProbePreservesFilesAndChecksLength(t *testing.T) {
 	dir := t.TempDir()
@@ -161,6 +218,8 @@ func TestProbePreservesFilesAndChecksLength(t *testing.T) {
 	}
 }
 
+// TestSequenceFilename checks fixed-width sequence formatting, optional packet
+// keys, and prefix/extension handling, including the largest uint64 sequence.
 // Intentionally duplicated in paho/store/file/files_test.go; keep both copies in sync.
 func TestSequenceFilename(t *testing.T) {
 	for _, tc := range []struct {
@@ -180,6 +239,8 @@ func TestSequenceFilename(t *testing.T) {
 	}
 }
 
+// TestReadEntriesIgnoresQuarantinedDuplicates checks that quarantined files do
+// not conflict with live sequences but still reserve their sequence numbers.
 // Intentionally duplicated in paho/store/file/files_test.go; keep both copies in sync.
 func TestReadEntriesIgnoresQuarantinedDuplicates(t *testing.T) {
 	dir := t.TempDir()
@@ -199,8 +260,11 @@ func TestReadEntriesIgnoresQuarantinedDuplicates(t *testing.T) {
 	}
 }
 
-// Intentionally duplicated in paho/store/file/files_test.go; keep both copies in sync.
-func TestFailedRenameCleansTemporaryFile(t *testing.T) {
+// TestDurableFailedRenameCleansTemporaryFile checks that a failed publication
+// closes and removes the temporary file without altering the blocking destination.
+// Adapted from TestFailedRenameCleansTemporaryFile in paho/store/file/files_test.go;
+// this queue variant enables syncing because only durable writes use rename.
+func TestDurableFailedRenameCleansTemporaryFile(t *testing.T) {
 	dir := t.TempDir()
 	name := sequenceFilename("p", ".pkt", 1, "")
 	var opened *os.File
@@ -212,7 +276,7 @@ func TestFailedRenameCleansTemporaryFile(t *testing.T) {
 		}
 		// Force rename to fail after the existence check and completed write.
 		return os.Mkdir(filepath.Join(dir, name), 0700)
-	}, nil)
+	}, (*os.File).Sync)
 	if err == nil {
 		t.Fatal("expected rename failure")
 	}

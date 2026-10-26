@@ -32,6 +32,8 @@ func durableTestStore(t *testing.T, dir string) *Store {
 	return s
 }
 
+// TestStoreDefaultStillSyncsFiles checks that default options retain file-content
+// syncing for Put without enabling directory syncing for Put or Delete.
 func TestStoreDefaultStillSyncsFiles(t *testing.T) {
 	for _, opts := range [][]Option{nil, {}} {
 		s, err := New(t.TempDir(), "", "", opts...)
@@ -62,6 +64,9 @@ func TestStoreDefaultStillSyncsFiles(t *testing.T) {
 	}
 }
 
+// TestStoreWithDurableSyncsDirectories checks that reusable durable options enable
+// file-then-directory syncing for Put and directory syncing for Delete, with an
+// error from the constructor when the filesystem cannot support durable mode.
 func TestStoreWithDurableSyncsDirectories(t *testing.T) {
 	dir := t.TempDir()
 	opts := []Option{WithDurable()}
@@ -116,6 +121,9 @@ func TestStoreWithDurableSyncsDirectories(t *testing.T) {
 	}
 }
 
+// TestDurableReplacementSyncOrder checks that the replacement is synced, closed,
+// published, and directory-synced before its predecessor is removed, followed by
+// another directory sync to persist that cleanup.
 func TestDurableReplacementSyncOrder(t *testing.T) {
 	s := durableTestStore(t, t.TempDir())
 	if err := s.Put(7, packets.PUBLISH, strings.NewReader("publish")); err != nil {
@@ -171,6 +179,8 @@ func TestDurableReplacementSyncOrder(t *testing.T) {
 	}
 }
 
+// TestDurableFileSyncFailurePreservesPacket checks that failed replacement syncing
+// leaves the original packet intact, removes the temporary file, and permits a retry.
 func TestDurableFileSyncFailurePreservesPacket(t *testing.T) {
 	s := durableTestStore(t, t.TempDir())
 	if err := s.Put(7, packets.PUBLISH, strings.NewReader("original")); err != nil {
@@ -193,6 +203,9 @@ func TestDurableFileSyncFailurePreservesPacket(t *testing.T) {
 	checkData(t, s, 7, "replacement")
 }
 
+// TestDurableMutationSyncFailureStopsStore checks that a directory-sync failure
+// after mutation returns ErrDurabilityUncertain and blocks further store access
+// until reopening recovers the on-disk state, preventing unsafe packet-ID reuse.
 func TestDurableMutationSyncFailureStopsStore(t *testing.T) {
 	for _, operation := range []string{"put", "replace", "delete", "quarantine", "quarantine fallback", "reset"} {
 		t.Run(operation, func(t *testing.T) {
@@ -258,6 +271,9 @@ func TestDurableMutationSyncFailureStopsStore(t *testing.T) {
 	}
 }
 
+// TestDurableCleanupFailurePreservesNewest checks that a durably published
+// replacement remains successful even if syncing predecessor cleanup fails.
+// Later removal must preserve the replacement until that cleanup can be synced.
 func TestDurableCleanupFailurePreservesNewest(t *testing.T) {
 	for _, operation := range []string{"delete", "quarantine", "reset"} {
 		t.Run(operation, func(t *testing.T) {
@@ -311,6 +327,8 @@ func TestDurableCleanupFailurePreservesNewest(t *testing.T) {
 	}
 }
 
+// TestDurableRecoverySyncFailure checks that recovery fails if obsolete-file
+// cleanup cannot be synced, while a later successful reopen recovers the newest packet.
 func TestDurableRecoverySyncFailure(t *testing.T) {
 	dir := t.TempDir()
 	oldName := filepath.Join(dir, "p7.pkt")
@@ -341,6 +359,8 @@ func TestDurableRecoverySyncFailure(t *testing.T) {
 	checkIDs(t, s, []uint16{})
 }
 
+// TestDurableStoreDirectorySyncUnsupported checks that initialization returns its
+// sync error and no store rather than silently disabling the requested durability.
 func TestDurableStoreDirectorySyncUnsupported(t *testing.T) {
 	failure := errors.New("directory sync unsupported")
 	s, err := newStore(filepath.Join(t.TempDir(), "new", "store"), "p", ".pkt", options{durable: true}, func(*os.File) error { return failure })
