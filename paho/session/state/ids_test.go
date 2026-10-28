@@ -30,39 +30,38 @@ import (
 func TestPacketIdAllocateAndFreeAll(t *testing.T) {
 	ss := NewInMemory()
 	ss.clientPackets = make(map[uint16]clientGenerated)
-	ss.inflight = newSendQuota(200) // not testing this but its needed for endClientGenerated to work
 
-	// Use full band
+	// Use the full band with subscription requests, which do not need stored packets.
 	responses := make([]<-chan packets.ControlPacket, 0, midMax)
 	for i := uint16(1); i != 0; i++ {
-		v, response, _ := ss.allocateNextPacketId(packets.PUBLISH)
+		v, response, _ := ss.allocateNextPacketId(packets.SUBSCRIBE)
 		assert.Equal(t, i, v)
 		responses = append(responses, response)
 	}
 
 	// Trying to allocate another ID should fail
-	_, response, err := ss.allocateNextPacketId(packets.PUBLISH)
+	_, response, err := ss.allocateNextPacketId(packets.SUBSCRIBE)
 	assert.ErrorIs(t, err, session.ErrPacketIdentifiersExhausted)
 	assert.Nil(t, response)
 
 	resp := packets.ControlPacket{
 		Content: nil,
 		FixedHeader: packets.FixedHeader{
-			Type:  packets.PUBACK,
+			Type:  packets.SUBACK,
 			Flags: 0,
 		},
 	}
 	for i := uint16(1); i != 0; i++ {
 		assert.NoError(t, ss.endClientGenerated(i, &resp))
-		if got, ok := <-responses[i-1]; !ok || got.Type != packets.PUBACK {
-			t.Fatalf("response for packet %d is type %d, open=%t; want PUBACK", i, got.Type, ok)
+		if got, ok := <-responses[i-1]; !ok || got.Type != packets.SUBACK {
+			t.Fatalf("response for packet %d is type %d, open=%t; want SUBACK", i, got.Type, ok)
 		}
 	}
 
 	// Allocate all Mids again
 	responses = responses[:0]
 	for i := uint16(1); i != 0; i++ {
-		v, response, _ := ss.allocateNextPacketId(packets.PUBLISH)
+		v, response, _ := ss.allocateNextPacketId(packets.SUBSCRIBE)
 		assert.Equal(t, i, v)
 		responses = append(responses, response)
 	}
@@ -80,18 +79,17 @@ func TestPacketIdAllocateAndFreeAll(t *testing.T) {
 func TestPacketIdHoles(t *testing.T) {
 	ss := NewInMemory()
 	ss.clientPackets = make(map[uint16]clientGenerated)
-	ss.inflight = newSendQuota(200) // not testing this but its needed for endClientGenerated to work
 
-	// Allocate all Mids
+	// Allocate all Mids with requests that do not need stored packets.
 	for i := uint16(1); i != 0; i++ {
-		v, _, _ := ss.allocateNextPacketId(packets.PUBLISH)
+		v, _, _ := ss.allocateNextPacketId(packets.SUBSCRIBE)
 		assert.Equal(t, i, v)
 	}
 
 	resp := packets.ControlPacket{
 		Content: nil,
 		FixedHeader: packets.FixedHeader{
-			Type:  packets.PUBACK,
+			Type:  packets.SUBACK,
 			Flags: 0,
 		},
 	}
@@ -107,7 +105,7 @@ func TestPacketIdHoles(t *testing.T) {
 	}
 	t.Log("Num of holes:", len(h))
 	for i := 0; i < len(h); i++ {
-		_, _, err := ss.allocateNextPacketId(packets.PUBLISH)
+		_, _, err := ss.allocateNextPacketId(packets.SUBSCRIBE)
 		assert.Nil(t, err)
 	}
 }

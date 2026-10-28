@@ -815,6 +815,49 @@ func TestPublishEventTransitionDoesNotRestoreDiscardedSession(t *testing.T) {
 	}
 }
 
+// TestPublishEventCompletionRetry retains a failed acknowledgement cleanup without
+// invoking callbacks under the mutex or reporting a second, contradictory outcome.
+func TestPublishEventCompletionRetry(t *testing.T) {
+	store := &persistenceErrorStore{Store: memory.New()}
+	s := New(store, memory.New())
+	defer s.Close()
+	eventConnect(t, s, io.Discard, false)
+	pub := eventPublish(1)
+	response, err := s.AddToSession(t.Context(), pub)
+	require.NoError(t, err)
+	quota := s.inflight.quota
+	store.deleteErr = errors.New("delete failed")
+	count := 0
+	s.SetPublishEventHandler(session.PublishEventHandler{
+		ReadStoredPacket: session.ReadStoredFull,
+		OnEvent: func(e session.PublishEvent) {
+			assertEventUnlocked(t, s)
+			count++
+			assert.Equal(t, session.PublishEventComplete, e.Type)
+			assert.ErrorIs(t, e.Err, store.deleteErr)
+			require.NotNil(t, e.Source)
+			assert.Equal(t, "order/42", eventUsers(e.Source)[0].Value)
+		},
+	})
+	ack := eventAck(packets.PUBACK, pub.PacketID, 0)
+	require.ErrorIs(t, s.PacketReceived(ack, nil), store.deleteErr)
+	assert.Equal(t, quota, s.inflight.quota, "failed deletion must retain send quota")
+	assert.Contains(t, s.clientPackets, pub.PacketID, "failed deletion must retain the packet ID")
+	select {
+	case <-response:
+		t.Fatal("completion must wait for cleanup")
+	default:
+	}
+	store.deleteErr = nil
+	require.NoError(t, s.PacketReceived(eventAck(packets.PUBACK, pub.PacketID, 0x87), nil))
+	assert.Equal(t, 1, count)
+	assert.Equal(t, quota+1, s.inflight.quota)
+	assert.NotContains(t, s.clientPackets, pub.PacketID)
+	assert.Equal(t, *ack, <-response, "cleanup must preserve the first acknowledgement")
+	_, open := <-response
+	assert.False(t, open)
+}
+
 // TestPublishEventSourceSurvivesPacketIDReuse checks that a callback can repeatedly read the original publication
 // after its stored packet has been deleted and its MQTT identifier has been assigned to another publication.
 func TestPublishEventSourceSurvivesPacketIDReuse(t *testing.T) {

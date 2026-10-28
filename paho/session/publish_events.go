@@ -39,6 +39,8 @@ const (
 	PublishEventPubrec PublishEventType = iota
 	// PublishEventComplete reports PUBACK, rejection PUBREC, or PUBCOMP. Consult Trigger for the reason code;
 	// completion does not necessarily mean success.
+	// If deleting the stored packet fails, Err includes the cleanup error. The event still reports the broker's
+	// acknowledgement, but the response channel and packet identifier remain pending until cleanup succeeds.
 	PublishEventComplete
 	// PublishEventSessionLost reports a publication discarded when the MQTT session is cleared. Delivery status is
 	// unknown. Ordinary reconnects and closing a persistent session do not generate this event for publications

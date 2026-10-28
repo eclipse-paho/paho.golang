@@ -453,7 +453,12 @@ func (c *Client) Ack(pb *Publish) error {
 
 // ack acknowledges a message (note: called by acksTracker to ensure these are sent in order)
 func (c *Client) ack(pb *packets.Publish) {
-	c.config.Session.Ack(pb)
+	if pb.QoS == 0 {
+		return
+	}
+	if err := c.config.Session.Ack(pb); err != nil {
+		c.reportError(fmt.Errorf("session failed acknowledging publish %d: %w", pb.PacketID, err))
+	}
 }
 
 // routePublishPackets listens on c.publishPackets and passes received messages to the handlers
@@ -764,10 +769,12 @@ func (c *Client) Subscribe(ctx context.Context, s *Subscribe) (*Suback, error) {
 		return nil, err
 	}
 
-	// From this point on the message is in store, and ret will receive something regardless of whether we succeed in
-	// writing the packet to the connection or not.
+	// The session owns the identifier until acknowledgement, local rejection, or disconnection.
 	if _, err := sp.WriteTo(c.config.Conn); err != nil {
-		// The packet will remain in the session state until `Session` is notified of the disconnection.
+		if errors.Is(err, packets.ErrEncoding) {
+			c.config.Session.PacketNotSent(sp.PacketID, ret)
+		}
+		// A transport failure may have sent data, so its identifier remains reserved.
 		return nil, err
 	}
 	c.config.PingHandler.PacketSent()
@@ -829,10 +836,12 @@ func (c *Client) Unsubscribe(ctx context.Context, u *Unsubscribe) (*Unsuback, er
 		return nil, err
 	}
 
-	// From this point on the message is in store, and ret will receive something regardless of whether we succeed in
-	// writing the packet to the connection or not
+	// The session owns the identifier until acknowledgement, local rejection, or disconnection.
 	if _, err := up.WriteTo(c.config.Conn); err != nil {
-		// The packet will remain in the session state until `Session` is notified of the disconnection.
+		if errors.Is(err, packets.ErrEncoding) {
+			c.config.Session.PacketNotSent(up.PacketID, ret)
+		}
+		// A transport failure may have sent data, so its identifier remains reserved.
 		return nil, err
 	}
 	c.config.PingHandler.PacketSent()

@@ -53,6 +53,9 @@ or broker receipt, so it is not a safe signal to shut down the connection immedi
 
 `OnError` reports store/read/cleanup and tracking problems. It does not necessarily mean a publication failed: a 
 retained packet may complete later. A cleanup error can produce both an acknowledged result and an error notification. 
+That result reports the broker's acknowledgement; the session keeps the packet identifier reserved and delays the
+final acknowledgement on the session response channel until local cleanup succeeds. Cleanup retries do not repeat
+the result or change it to session loss.
 If the stored source cannot be read, `Problem.ID` is empty; the tracker cannot safely infer an application ID from the 
 MQTT packet ID. Bulk session cleanup errors likewise cannot be assigned to an individual publication.
 

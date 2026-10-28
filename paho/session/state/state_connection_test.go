@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"testing"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/eclipse/paho.golang/packets"
 	"github.com/eclipse/paho.golang/paho/session"
+	storefile "github.com/eclipse/paho.golang/paho/store/file"
 	"github.com/eclipse/paho.golang/paho/store/memory"
 )
 
@@ -390,6 +392,61 @@ func TestAddToSessionReturnsNilChannelOnStoreFailure(t *testing.T) {
 	}
 }
 
+// Encoding errors in the default memory store must release the packet ID and send
+// quota so that the caller can correct the packet and retry on the same connection.
+func TestAddToSessionEncodingErrorReleasesResources(t *testing.T) {
+	for _, qos := range []byte{1, 2} {
+		for _, invalidID := range []int{-1, 268435456} {
+			t.Run(fmt.Sprintf("qos%d/identifier%d", qos, invalidID), func(t *testing.T) {
+				s := NewInMemory()
+				receiveMaximum := uint16(1)
+				connack := &packets.Connack{Properties: &packets.Properties{ReceiveMaximum: &receiveMaximum}}
+				if err := s.ConAckReceived(io.Discard, &packets.Connect{}, connack); err != nil {
+					t.Fatalf("ConAckReceived: %v", err)
+				}
+				publish := &packets.Publish{
+					QoS:        qos,
+					Topic:      "encoding/failure",
+					Properties: &packets.Properties{SubscriptionIdentifier: &invalidID},
+				}
+				response, err := s.AddToSession(context.Background(), publish)
+				t.Cleanup(func() { _ = s.Close() })
+				if err == nil {
+					t.Fatal("AddToSession succeeded with an invalid subscription identifier")
+				}
+				if response != nil || publish.PacketID != 0 {
+					t.Fatalf("failed AddToSession returned channel %v and packet ID %d", response, publish.PacketID)
+				}
+				s.mu.Lock()
+				pending := len(s.clientPackets)
+				s.mu.Unlock()
+				if pending != 0 {
+					t.Fatalf("encoding failure left %d packet IDs allocated", pending)
+				}
+				ids, err := s.clientStore.List()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(ids) != 0 {
+					t.Fatalf("encoding failure left stored packets: %v", ids)
+				}
+
+				// With a receive maximum of one, this blocks if the failed write leaked quota.
+				publish.Properties.SubscriptionIdentifier = nil
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				response, err = s.AddToSession(ctx, publish)
+				if err != nil {
+					t.Fatalf("AddToSession after correcting the packet: %v", err)
+				}
+				if response == nil || publish.PacketID == 0 {
+					t.Fatal("successful retry did not return a response channel and packet ID")
+				}
+			})
+		}
+	}
+}
+
 // TestConAckFailureRollsBackConnectionState if we are unable to access our persisted store upon receipt of a CONNACK
 // then what should we actually do???
 func TestConAckFailureRollsBackConnectionState(t *testing.T) {
@@ -565,6 +622,188 @@ func TestAddToSessionOwnsResponseChannel(t *testing.T) {
 	}
 }
 
+func requireRemovedResponse(t *testing.T, response <-chan packets.ControlPacket) {
+	t.Helper()
+	select {
+	case got, ok := <-response:
+		if !ok || got.Type != 0 {
+			t.Fatalf("removed response is type %d, open=%t; want one zero-value response", got.Type, ok)
+		}
+	default:
+		t.Fatal("removed transaction was not completed")
+	}
+	select {
+	case _, ok := <-response:
+		if ok {
+			t.Fatal("removed transaction received more than one response")
+		}
+	default:
+		t.Fatal("removed transaction's response channel was not closed")
+	}
+}
+
+func TestPacketNotSentReleasesSubscription(t *testing.T) {
+	for _, packetType := range []byte{packets.SUBSCRIBE, packets.UNSUBSCRIBE} {
+		request := packets.NewControlPacket(packetType)
+		t.Run(request.PacketType(), func(t *testing.T) {
+			s := NewInMemory()
+			t.Cleanup(func() { _ = s.Close() })
+			if err := s.ConAckReceived(io.Discard, &packets.Connect{}, &packets.Connack{}); err != nil {
+				t.Fatal(err)
+			}
+			response, err := s.AddToSession(t.Context(), request.Content.(session.Packet))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.PacketNotSent(request.PacketID(), nil)
+			s.PacketNotSent(request.PacketID(), make(chan packets.ControlPacket))
+			select {
+			case <-response:
+				t.Fatal("a notification for a different transaction removed the request")
+			default:
+			}
+			s.PacketNotSent(request.PacketID(), response)
+			s.PacketNotSent(request.PacketID(), response) // Repeated notification must be harmless.
+			requireRemovedResponse(t, response)
+
+			s.mu.Lock()
+			remaining := len(s.clientPackets)
+			s.lastMid = request.PacketID() - 1 // Make the allocator try the released identifier first.
+			s.mu.Unlock()
+			if remaining != 0 {
+				t.Fatalf("PacketNotSent left %d identifiers allocated", remaining)
+			}
+			next := packets.NewControlPacket(packetType)
+			if _, err := s.AddToSession(t.Context(), next.Content.(session.Packet)); err != nil {
+				t.Fatal(err)
+			}
+			if next.PacketID() != request.PacketID() {
+				t.Fatalf("identifier %d was not available for reuse; got %d", request.PacketID(), next.PacketID())
+			}
+		})
+	}
+}
+
+func TestPacketNotSentPreservesPublish(t *testing.T) {
+	s := NewInMemory()
+	t.Cleanup(func() { _ = s.Close() })
+	receiveMaximum := uint16(1)
+	if err := s.ConAckReceived(io.Discard, &packets.Connect{}, &packets.Connack{
+		Properties: &packets.Properties{ReceiveMaximum: &receiveMaximum},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	publish := &packets.Publish{QoS: 2, Topic: "test/persistent"}
+	response, err := s.AddToSession(t.Context(), publish)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, packetType := range []byte{packets.PUBLISH, packets.PUBREL} {
+		if packetType == packets.PUBREL {
+			pubrec := packets.NewControlPacket(packets.PUBREC)
+			pubrec.Content.(*packets.Pubrec).PacketID = publish.PacketID
+			if err := s.PacketReceived(pubrec, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.PacketNotSent(publish.PacketID, response)
+		s.mu.Lock()
+		transaction, exists := s.clientPackets[publish.PacketID]
+		s.mu.Unlock()
+		if !exists || transaction.packetType != packetType {
+			t.Fatalf("PacketNotSent removed a publish transaction: exists=%t type=%d", exists, transaction.packetType)
+		}
+		ids, err := s.clientStore.List()
+		if err != nil || len(ids) != 1 || ids[0] != publish.PacketID {
+			t.Fatalf("PacketNotSent changed persisted packets: ids=%v err=%v", ids, err)
+		}
+		s.inflight.mu.Lock()
+		quota := s.inflight.quota
+		s.inflight.mu.Unlock()
+		if quota != 0 {
+			t.Fatalf("PacketNotSent released a publish's send quota: %d", quota)
+		}
+		select {
+		case <-response:
+			t.Fatal("PacketNotSent completed a publish transaction")
+		default:
+		}
+	}
+}
+
+func TestPacketNotSentWhileReconnecting(t *testing.T) {
+	s := NewInMemory()
+	t.Cleanup(func() { _ = s.Close() })
+	expiry := uint32(60)
+	connect := &packets.Connect{Properties: &packets.Properties{SessionExpiryInterval: &expiry}}
+	connack := &packets.Connack{SessionPresent: true}
+	if err := s.ConAckReceived(io.Discard, connect, connack); err != nil {
+		t.Fatal(err)
+	}
+	for range 200 {
+		request := &packets.Subscribe{}
+		response, err := s.AddToSession(t.Context(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		wg.Go(func() {
+			<-start
+			s.PacketNotSent(request.PacketID, response)
+		})
+		wg.Go(func() {
+			<-start
+			if err := s.ConnectionLost(nil); err != nil {
+				t.Error(err)
+				return
+			}
+			if err := s.ConAckReceived(io.Discard, connect, connack); err != nil {
+				t.Error(err)
+			}
+		})
+		close(start)
+		wg.Wait()
+		requireRemovedResponse(t, response)
+
+		// Reuse the same identifier on the new connection, then deliver a late notification.
+		s.mu.Lock()
+		s.lastMid = request.PacketID - 1
+		s.mu.Unlock()
+		next := &packets.Subscribe{}
+		nextResponse, err := s.AddToSession(t.Context(), next)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if next.PacketID != request.PacketID {
+			t.Fatalf("expected identifier %d to be reused, got %d", request.PacketID, next.PacketID)
+		}
+		s.PacketNotSent(request.PacketID, response)
+		select {
+		case <-nextResponse:
+			t.Fatal("late notification removed the replacement transaction")
+		default:
+		}
+		ack := packets.NewControlPacket(packets.SUBACK)
+		ack.Content.(*packets.Suback).PacketID = next.PacketID
+		if err := s.PacketReceived(ack, nil); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got, ok := <-nextResponse:
+			if !ok || got.Type != packets.SUBACK {
+				t.Fatalf("replacement transaction returned type %d, open=%t", got.Type, ok)
+			}
+		default:
+			t.Fatal("replacement transaction was not acknowledged")
+		}
+		s.PacketNotSent(next.PacketID, nextResponse) // Harmless after an acknowledgement, too.
+		if _, ok := <-nextResponse; ok {
+			t.Fatal("acknowledged transaction's response channel was not closed")
+		}
+	}
+}
+
 // listFailOnceStore fails on the first attempt to call `List`, subsequent attempts succeed.
 type listFailOnceStore struct {
 	*memory.Store
@@ -604,5 +843,43 @@ func TestConAckRetriesServerStoreAfterFailure(t *testing.T) {
 	s.mu.Unlock()
 	if !exists || packetType != packets.PUBREC {
 		t.Fatalf("server session was not reloaded after retry: type=%d exists=%t", packetType, exists)
+	}
+}
+
+// TestConAckWithQuarantinedFileStore covers connection setup and cleanup when both stores share a directory
+// containing a quarantined packet. Such files must not cause permanent session-reset failures (issue #362).
+func TestConAckWithQuarantinedFileStore(t *testing.T) {
+	dir := t.TempDir()
+	clientStore, err := storefile.New(dir, "client_", ".pkt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverStore, err := storefile.New(dir, "server_", ".pkt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publish := &packets.Publish{PacketID: 7, QoS: 1, Topic: "test/quarantined"}
+	if err := clientStore.Put(7, packets.PUBLISH, publish); err != nil {
+		t.Fatal(err)
+	}
+	if err := clientStore.Quarantine(7); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverStore.Put(8, packets.PUBREC, &packets.Pubrec{PacketID: 8}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(clientStore, serverStore)
+	t.Cleanup(func() { _ = s.Close() })
+	for attempt := 0; attempt < 2; attempt++ {
+		var retransmitted bytes.Buffer
+		if err := s.ConAckReceived(&retransmitted, &packets.Connect{}, &packets.Connack{}); err != nil {
+			t.Fatalf("ConAckReceived on connection %d: %v", attempt+1, err)
+		}
+		if retransmitted.Len() != 0 {
+			t.Fatalf("retransmitted %d bytes despite the broker reporting no session", retransmitted.Len())
+		}
+		if err := s.ConnectionLost(nil); err != nil {
+			t.Fatalf("ConnectionLost on connection %d: %v", attempt+1, err)
+		}
 	}
 }

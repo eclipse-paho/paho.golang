@@ -59,6 +59,150 @@ func acknowledgement(kind byte, id uint16, reason byte) *packets.ControlPacket {
 	return cp
 }
 
+type cleanupErrorStore struct {
+	*memory.Store
+	deleteErr, resetErr error
+	applyDeleteOnError  bool
+}
+
+func (s *cleanupErrorStore) Delete(id uint16) error {
+	if s.deleteErr != nil && !s.applyDeleteOnError {
+		return s.deleteErr
+	}
+	if err := s.Store.Delete(id); err != nil {
+		return err
+	}
+	return s.deleteErr
+}
+
+func (s *cleanupErrorStore) Reset() error {
+	if s.resetErr != nil {
+		return s.resetErr
+	}
+	return s.Store.Reset()
+}
+
+// TestDeliveryAfterCleanupFailure combines acknowledgement tracking with durable cleanup.
+// Recovery must neither repeat the result nor report an acknowledged publication as lost.
+func TestDeliveryAfterCleanupFailure(t *testing.T) {
+	for _, recovery := range []struct {
+		name      string
+		expiry    uint32
+		present   bool
+		failReset bool
+	}{
+		{name: "resume", expiry: 600, present: true},
+		{name: "broker reset", expiry: 600},
+		{name: "broker reset retry", expiry: 600, failReset: true},
+		{name: "expired session"},
+		{name: "expired session reset retry", failReset: true},
+	} {
+		for _, ack := range []struct {
+			qos     byte
+			kind    byte
+			reason  byte
+			outcome delivery.Outcome
+		}{
+			{1, packets.PUBACK, 0, delivery.Acknowledged},
+			{1, packets.PUBACK, 0x87, delivery.Rejected},
+			{2, packets.PUBREC, 0x87, delivery.Rejected},
+			{2, packets.PUBCOMP, 0, delivery.Acknowledged},
+		} {
+			for _, applied := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%d/%x/applied=%t", recovery.name, ack.kind, ack.reason, applied), func(t *testing.T) {
+					store := &cleanupErrorStore{Store: memory.New(), applyDeleteOnError: applied}
+					s := state.New(store, memory.New())
+					defer s.Close()
+					var results []delivery.Result
+					var problems []delivery.Problem
+					tracker := delivery.New(delivery.Config{
+						OnResult: func(r delivery.Result) { results = append(results, r) },
+						OnError:  func(p delivery.Problem) { problems = append(problems, p) },
+					})
+					s.SetPublishEventHandler(tracker.Handler())
+					connect := &packets.Connect{Properties: &packets.Properties{SessionExpiryInterval: &recovery.expiry}}
+					require.NoError(t, s.ConAckReceived(io.Discard, connect, &packets.Connack{}))
+					pub := publication(t, tracker, ack.qos, "acknowledged").Content.(*packets.Publish)
+					response, err := s.AddToSession(t.Context(), pub)
+					require.NoError(t, err)
+					if ack.kind == packets.PUBCOMP {
+						require.NoError(t, s.PacketReceived(acknowledgement(packets.PUBREC, pub.PacketID, 0), nil))
+					}
+					pending := publication(t, tracker, 1, "pending").Content.(*packets.Publish)
+					_, err = s.AddToSession(t.Context(), pending)
+					require.NoError(t, err)
+					store.deleteErr = errors.New("delete failed")
+					final := acknowledgement(ack.kind, pub.PacketID, ack.reason)
+					require.ErrorIs(t, s.PacketReceived(final, nil), store.deleteErr)
+					require.Len(t, results, 1)
+					assert.Equal(t, "acknowledged", results[0].ID)
+					assert.Equal(t, ack.outcome, results[0].Outcome)
+					assert.Equal(t, ack.kind, results[0].Trigger)
+					assert.Equal(t, ack.reason, results[0].ReasonCode)
+					require.Len(t, problems, 1)
+					assert.Equal(t, "acknowledged", problems[0].ID)
+					assert.ErrorIs(t, problems[0].Err, store.deleteErr)
+					select {
+					case <-response:
+						t.Fatal("response must remain pending until durable cleanup succeeds")
+					default:
+					}
+
+					if recovery.failReset {
+						store.resetErr = errors.New("reset failed")
+					}
+					var wire bytes.Buffer
+					err = s.ConnectionLost(nil)
+					if recovery.expiry != 0 {
+						require.NoError(t, err)
+						err = s.ConAckReceived(&wire, connect, &packets.Connack{SessionPresent: recovery.present})
+					}
+					if recovery.failReset {
+						require.ErrorIs(t, err, store.resetErr)
+						require.Len(t, problems, 2)
+						assert.ErrorIs(t, problems[1].Err, store.resetErr)
+					} else if recovery.present && !applied {
+						require.ErrorIs(t, err, store.deleteErr)
+					} else {
+						require.NoError(t, err)
+					}
+					if recovery.failReset || recovery.present && !applied {
+						select {
+						case <-response:
+							t.Fatal("failed recovery completed the pending response")
+						default:
+						}
+						assert.Zero(t, wire.Len(), "failed recovery must not retransmit packets")
+						store.deleteErr, store.resetErr = nil, nil
+						require.NoError(t, s.ConAckReceived(&wire, connect, &packets.Connack{SessionPresent: recovery.present}))
+					}
+					select {
+					case got, open := <-response:
+						require.True(t, open)
+						assert.Equal(t, *final, got)
+					default:
+						t.Fatal("cleanup did not deliver the original acknowledgement")
+					}
+					_, open := <-response
+					assert.False(t, open)
+					if recovery.present {
+						assert.Len(t, results, 1, "recovery must not repeat a completion result")
+						replay, err := packets.ReadPacket(&wire)
+						require.NoError(t, err)
+						assert.Equal(t, pending.PacketID, replay.PacketID())
+					} else {
+						require.Len(t, results, 2, "only the unacknowledged publication is lost")
+						assert.Equal(t, "pending", results[1].ID)
+						assert.Equal(t, delivery.Unknown, results[1].Outcome)
+						assert.ErrorIs(t, results[1].Err, delivery.ErrSessionLost)
+					}
+					assert.Zero(t, wire.Len(), "the acknowledged publication must not be retransmitted")
+				})
+			}
+		}
+	}
+}
+
 // TestTrack checks generated and supplied IDs, property ownership, and invalid input.
 func TestTrack(t *testing.T) {
 	tracker := delivery.New(delivery.Config{})

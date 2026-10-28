@@ -18,6 +18,7 @@ package packets
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"reflect"
@@ -28,6 +29,75 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type packetWithTestBuffers struct {
+	Packet
+	buffers net.Buffers
+	err     error
+}
+
+func (p packetWithTestBuffers) Buffers() (net.Buffers, error) {
+	return p.buffers, p.err
+}
+
+type failingPacketWriter struct {
+	calls int
+	n     int
+	err   error
+}
+
+func (w *failingPacketWriter) Write(p []byte) (int, error) {
+	w.calls++
+	return min(w.n, len(p)), w.err
+}
+
+func TestWriteToEncodingErrorDoesNotWrite(t *testing.T) {
+	encodingErr := errors.New("cannot encode content")
+	invalidID := -1
+	// Reuse one buffer to exceed the remaining-length limit without a large allocation.
+	largeBuffers := make(net.Buffers, 4096)
+	block := make([]byte, 65536)
+	for i := range largeBuffers {
+		largeBuffers[i] = block
+	}
+	for _, tc := range []struct {
+		name   string
+		packet io.WriterTo
+		cause  error
+	}{
+		{"content", &ControlPacket{Content: packetWithTestBuffers{err: encodingErr}}, encodingErr},
+		{"remaining length", &ControlPacket{Content: packetWithTestBuffers{buffers: largeBuffers}}, nil},
+		{"properties", &Subscribe{Properties: &Properties{SubscriptionIdentifier: &invalidID}}, nil},
+		{"fixed header", &FixedHeader{remainingLength: -1}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writer := &failingPacketWriter{err: io.ErrClosedPipe}
+			n, err := tc.packet.WriteTo(writer)
+			require.ErrorIs(t, err, ErrEncoding)
+			if tc.cause != nil {
+				assert.ErrorIs(t, err, tc.cause)
+			}
+			assert.Zero(t, n)
+			assert.Zero(t, writer.calls)
+		})
+	}
+}
+
+func TestWriteToPreservesTransportErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		n    int
+	}{{"zero bytes", 0}, {"partial write", 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			writer := &failingPacketWriter{n: tc.n, err: io.ErrClosedPipe}
+			n, err := (&Pingreq{}).WriteTo(writer)
+			require.ErrorIs(t, err, io.ErrClosedPipe)
+			assert.False(t, errors.Is(err, ErrEncoding))
+			assert.Equal(t, int64(tc.n), n)
+			assert.Equal(t, 1, writer.calls)
+		})
+	}
+}
 
 func TestEncodeVBI127(t *testing.T) {
 	b, err := encodeVBI(127)
