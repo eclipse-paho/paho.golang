@@ -13,7 +13,9 @@
 package file
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -21,6 +23,9 @@ import (
 	"testing"
 
 	"github.com/eclipse/paho.golang/packets"
+	"github.com/eclipse/paho.golang/paho/session"
+	"github.com/eclipse/paho.golang/paho/session/state"
+	"github.com/eclipse/paho.golang/paho/store/memory"
 )
 
 func durableTestStore(t *testing.T, dir string) *Store {
@@ -267,6 +272,91 @@ func TestDurableMutationSyncFailureStopsStore(t *testing.T) {
 				}
 			}
 			checkIDs(t, s, []uint16{})
+		})
+	}
+}
+
+// TestSessionReconnectAfterUncertainInboundMutation checks that an existing
+// session cannot bypass an unusable inbound store through its cached packet IDs.
+// Both taking ownership (PUBREC) and completing delivery (PUBCOMP) must require
+// store recovery before another connection is accepted.
+func TestSessionReconnectAfterUncertainInboundMutation(t *testing.T) {
+	for _, ack := range []byte{packets.PUBREC, packets.PUBCOMP} {
+		t.Run(packets.NewControlPacket(ack).PacketType(), func(t *testing.T) {
+			dir := t.TempDir()
+			server := durableTestStore(t, dir)
+			s := state.New(memory.New(), server)
+			t.Cleanup(func() { _ = s.Close() })
+			expiry := uint32(600)
+			connect := &packets.Connect{Properties: &packets.Properties{SessionExpiryInterval: &expiry}}
+			connack := &packets.Connack{SessionPresent: true}
+			if err := s.ConAckReceived(io.Discard, connect, connack); err != nil {
+				t.Fatal(err)
+			}
+			pub := &packets.Publish{PacketID: 7, QoS: 2, Topic: "durable/inbound"}
+			pubrel := packets.NewControlPacket(packets.PUBREL)
+			pubrel.Content.(*packets.Pubrel).PacketID = pub.PacketID
+			if ack == packets.PUBCOMP {
+				if err := s.Ack(pub); err != nil {
+					t.Fatal(err)
+				}
+			}
+			failure := errors.New("directory sync failed")
+			server.syncFile = func(f *os.File) error {
+				info, err := f.Stat()
+				if err != nil {
+					return err
+				}
+				if info.IsDir() {
+					return failure
+				}
+				return nil
+			}
+			var err error
+			if ack == packets.PUBREC {
+				err = s.Ack(pub)
+			} else {
+				err = s.PacketReceived(pubrel, nil)
+			}
+			if !errors.Is(err, ErrDurabilityUncertain) || !errors.Is(err, failure) {
+				t.Fatalf("expected uncertain inbound mutation: %v", err)
+			}
+			if err := s.ConnectionLost(nil); err != nil {
+				t.Fatal(err)
+			}
+			// Even after the filesystem recovers, this Store requires reopening.
+			server.syncFile = func(*os.File) error { return nil }
+			for attempt := 0; attempt < 2; attempt++ {
+				if err := s.ConAckReceived(io.Discard, connect, connack); !errors.Is(err, ErrDurabilityUncertain) {
+					t.Fatalf("reconnect %d accepted an uncertain inbound store: %v", attempt, err)
+				}
+				if _, err := s.AddToSession(t.Context(), &packets.Subscribe{}); !errors.Is(err, session.ErrNoConnection) {
+					t.Fatalf("failed recovery left session connected: %v", err)
+				}
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			s = state.New(memory.New(), durableTestStore(t, dir))
+			var wire bytes.Buffer
+			if err := s.ConAckReceived(&wire, connect, connack); err != nil {
+				t.Fatalf("recovered stores could not reconnect: %v", err)
+			}
+			if ack == packets.PUBREC {
+				pub.Duplicate = true
+				delivered := make(chan *packets.Publish, 1)
+				if err := s.PacketReceived(pub.ToControlPacket(), delivered); err != nil {
+					t.Fatal(err)
+				}
+				if len(delivered) != 0 {
+					t.Fatal("recovered PUBREC did not suppress duplicate delivery")
+				}
+			} else if err := s.PacketReceived(pubrel, nil); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := packets.ReadPacket(&wire); err != nil || got.Type != ack || got.PacketID() != pub.PacketID {
+				t.Fatalf("unexpected recovered acknowledgement: %v, %v", got, err)
+			}
 		})
 	}
 }

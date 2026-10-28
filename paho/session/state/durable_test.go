@@ -29,20 +29,27 @@ import (
 type persistenceErrorStore struct {
 	*memory.Store
 	putErr, deleteErr, getErr, quarantineErr error
+	applyMutationOnError                     bool
 }
 
 func (s *persistenceErrorStore) Put(id uint16, kind byte, w io.WriterTo) error {
-	if s.putErr != nil {
+	if s.putErr != nil && !s.applyMutationOnError {
 		return s.putErr
 	}
-	return s.Store.Put(id, kind, w)
+	if err := s.Store.Put(id, kind, w); err != nil {
+		return err
+	}
+	return s.putErr
 }
 
 func (s *persistenceErrorStore) Delete(id uint16) error {
-	if s.deleteErr != nil {
+	if s.deleteErr != nil && !s.applyMutationOnError {
 		return s.deleteErr
 	}
-	return s.Store.Delete(id)
+	if err := s.Store.Delete(id); err != nil {
+		return err
+	}
+	return s.deleteErr
 }
 
 func (s *persistenceErrorStore) Get(id uint16) (io.ReadCloser, error) {
@@ -122,6 +129,66 @@ func TestInboundQoS2PersistsBeforeAcknowledging(t *testing.T) {
 	}
 	if cp, err := packets.ReadPacket(&wire); err != nil || cp.Type != packets.PUBCOMP {
 		t.Fatalf("unknown PUBREL was not acknowledged: %v, %v", cp, err)
+	}
+}
+
+// TestInboundMutationErrorReloadsSession checks recovery with a store that can
+// resume operations after an error. Since the mutation may already have happened,
+// reconnect must recover the actual inventory rather than reuse cached state.
+func TestInboundMutationErrorReloadsSession(t *testing.T) {
+	for _, ack := range []byte{packets.PUBREC, packets.PUBCOMP} {
+		t.Run(packets.NewControlPacket(ack).PacketType(), func(t *testing.T) {
+			store := &persistenceErrorStore{Store: memory.New(), applyMutationOnError: true}
+			s := New(memory.New(), store)
+			t.Cleanup(func() { _ = s.Close() })
+			expiry := uint32(600)
+			connect := &packets.Connect{Properties: &packets.Properties{SessionExpiryInterval: &expiry}}
+			connack := &packets.Connack{SessionPresent: true}
+			if err := s.ConAckReceived(io.Discard, connect, connack); err != nil {
+				t.Fatal(err)
+			}
+			pub := &packets.Publish{PacketID: 7, QoS: 2, Topic: "recovered/inbound"}
+			pubrel := packets.NewControlPacket(packets.PUBREL)
+			pubrel.Content.(*packets.Pubrel).PacketID = pub.PacketID
+			failure := errors.New("mutation applied before failure")
+			var err error
+			if ack == packets.PUBREC {
+				store.putErr = failure
+				err = s.Ack(pub)
+			} else {
+				if err := s.Ack(pub); err != nil {
+					t.Fatal(err)
+				}
+				store.deleteErr = failure
+				err = s.PacketReceived(pubrel, nil)
+			}
+			if !errors.Is(err, failure) {
+				t.Fatalf("mutation error was lost: %v", err)
+			}
+			if err := s.ConnectionLost(nil); err != nil {
+				t.Fatal(err)
+			}
+			store.putErr, store.deleteErr = nil, nil
+			var wire bytes.Buffer
+			if err := s.ConAckReceived(&wire, connect, connack); err != nil {
+				t.Fatalf("recovered store could not reconnect: %v", err)
+			}
+			if ack == packets.PUBREC {
+				pub.Duplicate = true
+				delivered := make(chan *packets.Publish, 1)
+				if err := s.PacketReceived(pub.ToControlPacket(), delivered); err != nil {
+					t.Fatal(err)
+				}
+				if len(delivered) != 0 {
+					t.Fatal("did not reload persisted PUBREC; redelivered the message")
+				}
+			} else if err := s.PacketReceived(pubrel, nil); err != nil {
+				t.Fatalf("did not reload completed transaction: %v", err)
+			}
+			if got, err := packets.ReadPacket(&wire); err != nil || got.Type != ack || got.PacketID() != pub.PacketID {
+				t.Fatalf("unexpected recovered acknowledgement: %v, %v", got, err)
+			}
+		})
 	}
 }
 

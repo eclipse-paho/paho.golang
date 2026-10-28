@@ -110,6 +110,7 @@ type State struct {
 	serverPackets           map[uint16]byte // The last packet received from the server with this ID (cleared when the transaction is complete)
 	serverStore             storer          // Used to store session state that survives connection loss
 	serverStoreResetPending bool            // A failed reset must complete before stored packets can be reused
+	serverStoreNeedsReload  bool            // A failed mutation may leave the cached packet IDs out of sync with the store
 
 	// The number of messages in flight needs to be limited, as per receive maximum received from the server.
 	inflight *sendQuota
@@ -222,7 +223,9 @@ func (s *State) conAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 		s.clientPackets = make(map[uint16]clientGenerated) // This will be populated whilst packets are resent
 	}
 
-	if s.serverPackets == nil {
+	if s.serverPackets == nil || s.serverStoreNeedsReload {
+		// A storage error may have changed persistent state or made the store unusable.
+		// Recover its inventory before accepting a connection that could deliver messages.
 		if err := s.loadServerSession(ca); err != nil {
 			return removed, fmt.Errorf("failed to load server session: %w", err)
 		}
@@ -298,8 +301,8 @@ func (s *State) conAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 	return removed, nil
 }
 
-// loadServerSession should be called once, when the first connection is established.
-// It loads the server session state from the store.
+// loadServerSession loads the server session state when first connecting or
+// reconnecting after an inbound storage mutation failed.
 // The caller must hold a lock on s.mu
 func (s *State) loadServerSession(ca *packets.Connack) error {
 	serverPackets := make(map[uint16]byte)
@@ -338,6 +341,7 @@ func (s *State) loadServerSession(ca *packets.Connack) error {
 		}
 	}
 	s.serverPackets = serverPackets
+	s.serverStoreNeedsReload = false
 	return nil
 }
 
@@ -569,6 +573,7 @@ func (s *State) ack(pb *packets.Publish) error {
 		// the same QoS 2 message again, contrary to MQTT-4.3.3-10.
 		cp := pr.ToControlPacket()
 		if err := s.serverStore.Put(pb.PacketID, packets.PUBREC, cp); err != nil {
+			s.serverStoreNeedsReload = true
 			return fmt.Errorf("failed to store PUBREC for %d: %w", pb.PacketID, err)
 		}
 		s.serverPackets[pb.PacketID] = cp.Type
@@ -718,6 +723,7 @@ func (s *State) PacketReceived(recv *packets.ControlPacket, pubChan chan<- *pack
 				// must still receive PUBCOMP (MQTT-4.3.3-11).
 				if _, known := s.serverPackets[pr.PacketID]; known {
 					if err := s.serverStore.Delete(pr.PacketID); err != nil {
+						s.serverStoreNeedsReload = true
 						return fmt.Errorf("failed to remove message %d from server store: %w", pr.PacketID, err)
 					}
 					delete(s.serverPackets, pr.PacketID)
@@ -816,6 +822,7 @@ func (s *State) resetPendingStores() error {
 			serverErr = fmt.Errorf("failed to reset server store: %w", err)
 		} else {
 			s.serverStoreResetPending = false
+			s.serverStoreNeedsReload = false
 		}
 	}
 	if s.clientStoreResetPending {
@@ -850,6 +857,7 @@ func (s *State) tidy() []clientGenerated {
 		default:
 			delete(s.serverPackets, id)
 			if err := s.serverStore.Delete(id); err != nil {
+				s.serverStoreNeedsReload = true
 				s.errors.Printf("failed to remove server packet %d while tidying session: %s", id, err)
 			}
 		}
