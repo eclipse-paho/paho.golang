@@ -86,7 +86,8 @@ type (
 		// channel. One and only one message will be sent (and the channel closed).
 		// We also guarantee to always send to the channel (assuming there is a clean shutdown) so that the end user knows
 		// the status of the request.
-		responseChan    chan packets.ControlPacket
+		responseChan chan packets.ControlPacket
+		// A final acknowledgement retained until the persisted packet is deleted or the store is reset.
 		pendingResponse *packets.ControlPacket
 	}
 )
@@ -246,10 +247,18 @@ func (s *State) conAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 	if err != nil {
 		return removed, fmt.Errorf("failed to load stored message ids: %w", err)
 	}
-	// Possible that deletion from the store failed, in which case we still need to send the packet
+	// A final acknowledgement ends the exchange even if deleting its stored packet failed.
+	// Retry cleanup before replaying anything; acknowledged packets must not be retransmitted
+	// (including negative PUBACK/PUBREC responses, as required by MQTT-4.4.0-2).
 	for packetID, transaction := range s.clientPackets {
-		if transaction.pendingResponse == nil || slices.Contains(toResend, packetID) {
+		if transaction.pendingResponse == nil {
 			continue
+		}
+		if i := slices.Index(toResend, packetID); i >= 0 {
+			if err := s.clientStore.Delete(packetID); err != nil {
+				return removed, fmt.Errorf("failed to remove acknowledged message %d from store: %w", packetID, err)
+			}
+			toResend = slices.Delete(toResend, i, i+1)
 		}
 		complete(transaction, *transaction.pendingResponse)
 		delete(s.clientPackets, packetID)
@@ -521,7 +530,7 @@ func (s *State) endClientGenerated(packetID uint16, recv *packets.ControlPacket)
 		// Outgoing publish messages will be in the store (replaced with PUBREL that is sent)
 		if cg.packetType == packets.PUBLISH || cg.packetType == packets.PUBREL {
 			if err := s.clientStore.Delete(packetID); err != nil {
-				// Uncertain if packet was deleted or now; queue it to be send following reconnection
+				// Keep the final response until persistence cleanup succeeds.
 				pendingResponse := *recv
 				cg.pendingResponse = &pendingResponse
 				s.clientPackets[packetID] = cg
@@ -815,11 +824,15 @@ func (s *State) allocateNextPacketIdLocked(forPacketType byte, response chan pac
 func (s *State) clean() ([]clientGenerated, error) {
 	s.debug.Println("State.clean() called")
 	removed := make([]clientGenerated, 0, len(s.clientPackets))
-	for _, p := range s.clientPackets {
+	for packetID, p := range s.clientPackets {
+		if p.pendingResponse != nil {
+			// Retain acknowledged transactions until Reset succeeds, including across retries.
+			continue
+		}
 		removed = append(removed, p)
+		delete(s.clientPackets, packetID)
 	}
 	s.serverPackets = make(map[uint16]byte)
-	s.clientPackets = make(map[uint16]clientGenerated)
 
 	// It's important that the stores are reset before another connection is accepted (otherwise we
 	// may transmit data we should not). As such we signal that this is needed and it's done at the
@@ -848,6 +861,13 @@ func (s *State) resetPendingStores() error {
 			clientErr = fmt.Errorf("failed to reset client store: %w", err)
 		} else {
 			s.clientStoreResetPending = false
+			// There may be transactions that have a pendingResponse due to an earlier failure - clear these
+			for packetID, transaction := range s.clientPackets {
+				if transaction.pendingResponse != nil {
+					complete(transaction, *transaction.pendingResponse)
+					delete(s.clientPackets, packetID)
+				}
+			}
 		}
 	}
 	return errors.Join(serverErr, clientErr)

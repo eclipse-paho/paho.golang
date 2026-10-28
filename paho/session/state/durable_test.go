@@ -29,9 +29,9 @@ import (
 
 type persistenceErrorStore struct {
 	*memory.Store
-	putErr, deleteErr, getErr, quarantineErr, listErr error
-	applyMutationOnError                              bool
-	putCalls                                          int
+	putErr, deleteErr, getErr, quarantineErr, listErr, resetErr error
+	applyMutationOnError                                        bool
+	putCalls                                                    int
 }
 
 func (s *persistenceErrorStore) Put(id uint16, kind byte, w io.WriterTo) error {
@@ -74,6 +74,16 @@ func (s *persistenceErrorStore) List() ([]uint16, error) {
 		return nil, s.listErr
 	}
 	return s.Store.List()
+}
+
+func (s *persistenceErrorStore) Reset() error {
+	if s.resetErr != nil && !s.applyMutationOnError {
+		return s.resetErr
+	}
+	if err := s.Store.Reset(); err != nil {
+		return err
+	}
+	return s.resetErr
 }
 
 type persistenceCheckingWriter func([]byte) (int, error)
@@ -336,11 +346,11 @@ func TestFinalAcknowledgementWaitsForStoreDeletion(t *testing.T) {
 				t.Fatal(err)
 			}
 			var replay bytes.Buffer
-			if err := s.ConAckReceived(&replay, connect, connack); err != nil {
-				t.Fatal(err)
+			if err := s.ConAckReceived(&replay, connect, connack); !errors.Is(err, failure) {
+				t.Fatalf("recovery ignored deletion failure: %v", err)
 			}
-			if packet, err := packets.ReadPacket(&replay); err != nil || packet.PacketID() != pb.PacketID {
-				t.Fatalf("stored packet was not retransmitted: %v, %v", packet, err)
+			if replay.Len() != 0 {
+				t.Fatal("retransmitted an acknowledged packet while deletion was pending")
 			}
 			select {
 			case <-response:
@@ -350,22 +360,152 @@ func TestFinalAcknowledgementWaitsForStoreDeletion(t *testing.T) {
 			if _, ok := s.clientPackets[pb.PacketID]; !ok {
 				t.Fatal("recovery released an identifier still in the store")
 			}
+			if _, err := s.AddToSession(t.Context(), &packets.Publish{QoS: 1}); !errors.Is(err, session.ErrNoConnection) {
+				t.Fatalf("accepted a new publication while deletion was pending: %v", err)
+			}
 			store.deleteErr = nil
-			if err := s.PacketReceived(ack, nil); err != nil {
+			if err := s.ConAckReceived(&replay, connect, connack); err != nil {
 				t.Fatal(err)
 			}
+			if replay.Len() != 0 {
+				t.Fatal("retransmitted an acknowledged packet after deletion succeeded")
+			}
 			select {
-			case got := <-response:
-				if got.Type != kind {
-					t.Fatalf("completion type=%d, want %d", got.Type, kind)
+			case got, open := <-response:
+				if !open || !reflect.DeepEqual(got, *ack) {
+					t.Fatalf("final acknowledgement was not preserved: %#v, open=%t", got, open)
 				}
 			default:
 				t.Fatal("successful deletion did not complete the transaction")
 			}
+			if _, open := <-response; open {
+				t.Fatal("completed response channel was not closed")
+			}
 			if _, ok := s.clientPackets[pb.PacketID]; ok {
 				t.Fatal("successful deletion retained packet identifier")
 			}
+			if ids, err := store.List(); err != nil || len(ids) != 0 {
+				t.Fatalf("acknowledged packet remains in the store: %v, %v", ids, err)
+			}
+			if s.inflight.quota != s.inflight.initialQuota {
+				t.Fatalf("acknowledged packet consumed quota after recovery: %d", s.inflight.quota)
+			}
 		})
+	}
+}
+
+// TestFinalAcknowledgementSurvivesSessionReset covers both automatic cleanup on
+// disconnect and a broker that has discarded a persistent session. A failed
+// reset must keep the original acknowledgement until cleanup can be retried.
+func TestFinalAcknowledgementSurvivesSessionReset(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		expiry    uint32
+		failReset bool
+	}{
+		{name: "session expires"},
+		{name: "session expires with reset failure", failReset: true},
+		{name: "broker lost session", expiry: 600},
+		{name: "broker lost session with reset failure", expiry: 600, failReset: true},
+	} {
+		for _, kind := range []byte{packets.PUBACK, packets.PUBCOMP, packets.PUBREC} {
+			t.Run(tc.name+"/"+packets.NewControlPacket(kind).PacketType(), func(t *testing.T) {
+				store := &persistenceErrorStore{Store: memory.New()}
+				s := New(store, memory.New())
+				t.Cleanup(func() { _ = s.Close() })
+				connect := &packets.Connect{}
+				if tc.expiry != 0 {
+					connect.Properties = &packets.Properties{SessionExpiryInterval: &tc.expiry}
+				}
+				if err := s.ConAckReceived(io.Discard, connect, &packets.Connack{}); err != nil {
+					t.Fatal(err)
+				}
+				qos := byte(2)
+				if kind == packets.PUBACK {
+					qos = 1
+				}
+				publish := &packets.Publish{QoS: qos, Topic: "cleanup/acknowledged"}
+				response, err := s.AddToSession(t.Context(), publish)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if kind == packets.PUBCOMP {
+					if err := s.PacketReceived((&packets.Pubrec{PacketID: publish.PacketID}).ToControlPacket(), nil); err != nil {
+						t.Fatal(err)
+					}
+				}
+				unacknowledged, err := s.AddToSession(t.Context(), &packets.Publish{QoS: 1, Topic: "cleanup/unacknowledged"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ack := packets.NewControlPacket(kind)
+				switch packet := ack.Content.(type) {
+				case *packets.Puback:
+					packet.PacketID = publish.PacketID
+				case *packets.Pubcomp:
+					packet.PacketID = publish.PacketID
+				case *packets.Pubrec:
+					packet.PacketID, packet.ReasonCode = publish.PacketID, 0x87
+				}
+				store.deleteErr = errors.New("delete failed")
+				if err := s.PacketReceived(ack, nil); !errors.Is(err, store.deleteErr) {
+					t.Fatalf("ignored deletion failure: %v", err)
+				}
+				if tc.failReset {
+					store.resetErr = errors.New("reset failed")
+				}
+				var replay bytes.Buffer
+				err = s.ConnectionLost(nil)
+				if tc.expiry != 0 {
+					if err != nil {
+						t.Fatal(err)
+					}
+					err = s.ConAckReceived(&replay, connect, &packets.Connack{SessionPresent: false})
+				}
+				if !errors.Is(err, store.resetErr) {
+					t.Fatalf("cleanup returned %v, want %v", err, store.resetErr)
+				}
+				select {
+				case got, open := <-unacknowledged:
+					if !open || got.Type != 0 {
+						t.Fatalf("unacknowledged publication was not discarded: %#v, open=%t", got, open)
+					}
+				default:
+					t.Fatal("cleanup left an unacknowledged publication waiting")
+				}
+				if tc.failReset {
+					select {
+					case <-response:
+						t.Fatal("reported completion before store cleanup succeeded")
+					default:
+					}
+					if _, retained := s.clientPackets[publish.PacketID]; !retained {
+						t.Fatal("released acknowledged packet identifier before store cleanup")
+					}
+					store.resetErr = nil
+					if err := s.ConAckReceived(&replay, connect, &packets.Connack{SessionPresent: true}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				select {
+				case got, open := <-response:
+					if !open || !reflect.DeepEqual(got, *ack) {
+						t.Fatalf("final acknowledgement was not preserved: %#v, open=%t", got, open)
+					}
+				default:
+					t.Fatal("cleanup left the acknowledged publication waiting")
+				}
+				if _, open := <-response; open {
+					t.Fatal("completed response channel was not closed")
+				}
+				if len(s.clientPackets) != 0 || replay.Len() != 0 {
+					t.Fatal("retained or retransmitted packets from the discarded session")
+				}
+				if ids, err := store.List(); err != nil || len(ids) != 0 {
+					t.Fatalf("cleanup did not clear the store: %v, %v", ids, err)
+				}
+			})
+		}
 	}
 }
 
