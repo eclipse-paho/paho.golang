@@ -124,7 +124,7 @@ func TestFileStoreNaming(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("should be one file; got %#v", entries)
 	}
-	if entries[0].Name() != "BlahXX1.txt" {
+	if entries[0].Name() != "BlahXXs00000000000000000001-00001.txt" {
 		t.Fatalf("filename not as expected; got %s", entries[0].Name())
 	}
 
@@ -139,7 +139,7 @@ func TestFileStoreNaming(t *testing.T) {
 		t.Fatalf("should be one file; got %#v", entries)
 	}
 	fn := entries[0].Name()
-	if !strings.HasPrefix(fn, "BlahXX1") {
+	if !strings.HasPrefix(fn, "BlahXXs00000000000000000001-00001") {
 		t.Fatalf("quarantine filename prefix not as expected; got %s", entries[0].Name())
 	}
 

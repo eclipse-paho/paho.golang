@@ -22,118 +22,124 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
-// TestQuotaBasics performs basic testing of allocating/releasing message ids in inflight
+// TestQuotaBasics tests acquiring and releasing send quota, including FIFO waiter ordering.
+// AI Disclosure: OpenAI GPT-6 via Codex assisted with the test synchronization changes.
+// Assisted-by: OpenAI GPT-6
 func TestQuotaBasics(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		it := newSendQuota(5)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	it := newSendQuota(5)
-
-	// We should be able to acquire until the quota is hit
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	for i := uint32(0); i < 5; i++ {
-		if err := it.Acquire(ctx); err != nil {
-			t.Fatalf("failed to get slot: %v", err)
-		}
-	}
-	cancel()
-
-	// subsequent waiters should block until Release is called
-	for i := uint32(1); i < 5; i++ {
-		release := make(chan struct{})
-		released := make(chan error, 1)
-		ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
-		go func() {
-			<-release
-			it.Release()
-			close(released)
-		}()
-
-		aResult := make(chan error, 1)
-		go func() {
-			aResult <- it.Acquire(ctx)
-		}()
-		select {
-		case err := <-aResult:
-			t.Fatalf("slot should not be gained before previous one released: %d, %v", i, err)
-		case <-time.After(10 * time.Millisecond):
+		// We should be able to acquire until the quota is hit
+		for i := uint32(0); i < 5; i++ {
+			if err := it.Acquire(ctx); err != nil {
+				t.Fatalf("failed to get slot: %v", err)
+			}
 		}
 
-		close(release)
-		select {
-		case <-released:
-		case <-time.After(10 * time.Millisecond):
-			t.Fatalf("slot should have been released")
-		}
-		cancel()
-	}
+		// Subsequent waiters should block until Release is called.
+		for i := uint32(1); i < 5; i++ {
+			aResult := make(chan error, 1)
+			go func() {
+				aResult <- it.Acquire(ctx)
+			}()
+			synctest.Wait()
+			select {
+			case err := <-aResult:
+				t.Fatalf("slot should not be gained before previous one released: %d, %v", i, err)
+			default:
+			}
 
-	// Waiters should be released in order
-	ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
-	aResult := make(chan struct {
-		uint32
-		error
-	})
-	for i := uint32(0); i < 5; i++ {
-		go func(i uint32) {
-			aResult <- struct {
-				uint32
-				error
-			}{i, it.Acquire(ctx)}
-		}(i)
-		time.Sleep(time.Millisecond) // we want slots to be requested in known order
-	}
-	select {
-	case result := <-aResult:
-		t.Fatalf("await should not complete before slot is available: %v", result.error)
-	default:
-	}
-	for i := uint32(0); i < 5; i++ {
-		it.Release()
-		time.Sleep(time.Millisecond) // provide time for release to be processed
-	}
-	time.Sleep(time.Millisecond) // allow time for slots to be allocated
-	for i := uint32(0); i < 5; i++ {
+			if err := it.Release(); err != nil {
+				t.Fatalf("failed to release slot: %v", err)
+			}
+			synctest.Wait()
+			select {
+			case err := <-aResult:
+				if err != nil {
+					t.Fatalf("failed to get released slot: %v", err)
+				}
+			default:
+				t.Fatal("waiter should have acquired the released slot")
+			}
+		}
+
+		// Waiters should be released in order. Wait for each Acquire to block
+		// before starting the next, so queue order does not depend on scheduling.
+		aResult := make(chan struct {
+			uint32
+			error
+		}, 5)
+		for i := uint32(0); i < 5; i++ {
+			go func(i uint32) {
+				aResult <- struct {
+					uint32
+					error
+				}{i, it.Acquire(ctx)}
+			}(i)
+			synctest.Wait()
+		}
 		select {
 		case result := <-aResult:
-			if result.error != nil {
-				t.Fatalf("unexpected error: %v", result.error)
-			}
-			if result.uint32 != i {
-				t.Fatalf("release out of order; expected %d, got %d", i, result.uint32)
-			}
+			t.Fatalf("acquire should not complete before slot is available: %v", result.error)
 		default:
-			t.Fatalf("await should have compelted")
 		}
-	}
+		for i := uint32(0); i < 5; i++ {
+			if err := it.Release(); err != nil {
+				t.Fatalf("failed to release slot: %v", err)
+			}
+			// Observe this waiter before releasing another: FIFO allocation does
+			// not guarantee the order in which runnable goroutines report results.
+			synctest.Wait()
+			select {
+			case result := <-aResult:
+				if result.error != nil {
+					t.Fatalf("unexpected error: %v", result.error)
+				}
+				if result.uint32 != i {
+					t.Fatalf("release out of order; expected %d, got %d", i, result.uint32)
+				}
+			default:
+				t.Fatal("waiter should have acquired the released slot")
+			}
+		}
 
-	// Check internal state
-	if it.quota != 0 {
-		t.Fatalf("expected 0 quota: %v", it.quota)
-	}
-	if len(it.waiters) != 0 {
-		t.Fatalf("expected waiters to be empty: %v", it.waiters)
-	}
+		// Check internal state
+		if it.quota != 0 {
+			t.Fatalf("expected 0 quota: %v", it.quota)
+		}
+		if len(it.waiters) != 0 {
+			t.Fatalf("expected waiters to be empty: %v", it.waiters)
+		}
 
-	// Empty waiters
-	for i := uint32(0); i < 5; i++ {
-		it.Release()
-	}
-	// Check internal state
-	if it.quota != 5 {
-		t.Fatalf("expected 5 quota: %v", it.quota)
-	}
-	if len(it.waiters) != 0 {
-		t.Fatalf("expected waiters to be empty: %v", it.waiters)
-	}
+		// Restore the initial quota.
+		for i := uint32(0); i < 5; i++ {
+			if err := it.Release(); err != nil {
+				t.Fatalf("failed to release slot: %v", err)
+			}
+		}
+		// Check internal state
+		if it.quota != 5 {
+			t.Fatalf("expected 5 quota: %v", it.quota)
+		}
+		if len(it.waiters) != 0 {
+			t.Fatalf("expected waiters to be empty: %v", it.waiters)
+		}
 
-	// Releasing additional slots should have no impact
-	it.Release()
-	if it.quota != 5 {
-		t.Fatalf("expected 5 quota: %v", it.quota)
-	}
+		// Releasing additional slots should have no impact.
+		if err := it.Release(); !errors.Is(err, ErrUnexpectedRelease) {
+			t.Fatalf("expected ErrUnexpectedRelease at initial quota, got %v", err)
+		}
+		if it.quota != 5 {
+			t.Fatalf("expected 5 quota: %v", it.quota)
+		}
+	})
 }
 
 // TestQuotaContext checks that we can cancel waiters

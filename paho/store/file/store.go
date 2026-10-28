@@ -10,69 +10,121 @@
  *  and the Eclipse Distribution License is available at
  *    http://www.eclipse.org/org/documents/edl-v10.php.
  *
- *  SPDX-License-Identifier: EPL-2.0 OR BSD-3-Clause
+ * AI Disclosure: The sequence persistence and durable store support were generated with
+ * OpenAI GPT-6 via Codex. AI-generated portions are available under CC0-1.0.
+ * SPDX-License-Identifier: (EPL-2.0 OR BSD-3-Clause) AND CC0-1.0
+ * Assisted-by: OpenAI GPT-6
  */
 
+// Package file provides a sequence-ordered disk store. The basicfile sibling
+// package retains the original timestamp-ordered implementation as an opt-out.
 package file
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"sync"
-	"time"
 )
 
 const (
 	folderPermissions = os.FileMode(0770)
-	filePermissions   = os.FileMode(0666)
-	tmpExtension      = ".tmp"
 	corruptExtension  = ".CORRUPT" // quarantined files will be given this extension
 )
 
+// Option configures a file store created by New.
+type Option func(*options)
+
+type options struct {
+	durable bool
+}
+
 // New creates a file Store. Note that a file is written, read and deleted as part of this process to check that the
 // path is usable.
-// NOTE: Order is maintained using file ModTime, so there may be issues if the interval between messages is less than
-// the file system ModTime resolution.
-func New(path string, prefix string, extension string) (*Store, error) {
+// Files are ordered by a sequence in their filenames; packet IDs provide lookup.
+// Legacy files remain readable and sort before new entries, using ModTime and filename to break ties. A successful Put
+// replaces the ID and moves it to the end. Only one Store may own a path/prefix/extension namespace at a time. Files must
+// not be modified externally while it is open.
+// New syncs file contents. Pass WithDurable() for durable directory changes too.
+func New(path string, prefix string, extension string, opts ...Option) (*Store, error) {
+	var config options
+	for _, opt := range opts {
+		opt(&config)
+	}
+	return newStore(path, prefix, extension, config, (*os.File).Sync)
+}
+
+func newStore(path, prefix, extension string, config options, syncFile func(*os.File) error) (*Store, error) {
 	if len(extension) > 0 && extension[0] != '.' {
 		extension = "." + extension
 	}
 
-	if err := os.MkdirAll(path, folderPermissions); err != nil {
-		return nil, fmt.Errorf("failed to create store folder: %w", err)
+	var syncDir func(*os.File) error
+	if config.durable {
+		syncDir = syncFile
+	}
+	if err := makeStoreDirectory(path, syncDir); err != nil {
+		return nil, fmt.Errorf("failed to prepare store folder: %w", err)
 	}
 
-	// Better to fail fast; so we check that a file can be written/read with the passed in info
-	fn := filepath.Join(path, prefix+"TEST"+extension)
-	if err := os.WriteFile(fn, []byte("test"), filePermissions); err != nil {
-		return nil, fmt.Errorf("failed to write test file to specified folder: %w", err)
-	}
-	if _, err := os.ReadFile(fn); err != nil {
-		return nil, fmt.Errorf("failed to read test file from specified folder: %w", err)
-	}
-	if err := os.Remove(fn); err != nil {
-		return nil, fmt.Errorf("failed to remove test file from specified folder: %w", err)
+	if err := probeDirectory(path, prefix, extension, "65535"); err != nil {
+		return nil, err
 	}
 
-	return &Store{
+	s := &Store{
 		path:      path,
 		prefix:    prefix,
 		extension: extension,
-	}, nil
-
+		packets:   make(map[uint16]*storedPacket),
+		durable:   config.durable,
+		syncFile:  syncFile,
+	}
+	entries, last, err := readEntries(path, prefix, extension)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading store: %w", err)
+	}
+	s.lastSequence = last
+	for _, e := range entries {
+		id, err := strconv.ParseUint(e.Key, 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("invalid packet ID in filename %q: %w", e.Name, err)
+		}
+		p := &storedPacket{diskEntry: e}
+		if previous, ok := s.packets[uint16(id)]; ok {
+			p.obsolete = append(previous.obsolete, previous.Name)
+		}
+		s.packets[uint16(id)] = p
+	}
+	// A crash between committing a replacement and removing its predecessor can
+	// leave both files. Keep the newest and remove predecessors before serving it.
+	for _, p := range s.packets {
+		if err := s.removeObsolete(p); err != nil {
+			return nil, fmt.Errorf("failed recovering replaced packet: %w", err)
+		}
+	}
+	return s, nil
 }
 
 // Store is an implementation of a Store that stores the data on disk
 type Store struct {
-	// server store - holds packets where the message ID was generated on the server
-	sync.Mutex // Is this needed?
-	path       string
-	prefix     string
-	extension  string
+	sync.Mutex
+	path         string
+	prefix       string
+	extension    string
+	lastSequence uint64 // The last sequence written to disk
+	packets      map[uint16]*storedPacket
+	durable      bool
+	syncFile     func(*os.File) error
+	failure      error // Uncertain mutations require recovery with a new Store.
+}
+
+type storedPacket struct {
+	diskEntry
+	obsolete []string
 }
 
 // Put stores the packet
@@ -81,26 +133,41 @@ type Store struct {
 func (s *Store) Put(packetID uint16, packetType byte, w io.WriterTo) error {
 	s.Lock()
 	defer s.Unlock()
+	if s.failure != nil {
+		return s.failure
+	}
 
-	f, err := os.CreateTemp(s.path, s.fileNamePrefix(packetID)+"-*"+s.extension+tmpExtension)
+	sequence, err := nextSequence(&s.lastSequence)
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		return err
 	}
-	tmpFn := f.Name()
-	if _, err = w.WriteTo(f); err != nil {
-		f.Close()
-		_ = os.Remove(tmpFn)
-		return fmt.Errorf("failed to write packet to temp file: %w", err)
+	var key [5]byte
+	for i, id := len(key)-1, packetID; i >= 0; i-- {
+		key[i] = '0' + byte(id%10)
+		id /= 10
 	}
-	f.Sync() // want timestamps to be as accurate as possible (close and rename do not imply sync)
-	if err = f.Close(); err != nil {
-		_ = os.Remove(tmpFn)
-		return fmt.Errorf("failed to close temp file: %w", err)
+	name := sequenceFilename(s.prefix, s.extension, sequence, string(key[:]))
+	if err := writeEntry(s.path, name, func(out io.Writer) error {
+		_, err := w.WriteTo(out)
+		return err
+	}, s.syncFile); err != nil {
+		return fmt.Errorf("failed to store packet: %w", err)
 	}
-	if err = os.Rename(tmpFn, s.filePathForId(packetID)); err != nil {
-		_ = os.Remove(tmpFn)
-		return fmt.Errorf("failed to rename temp file: %w", err)
+	// The packet ID is already the map key; retaining a second string for it is
+	// only useful while parsing filenames during startup.
+	p := &storedPacket{diskEntry: diskEntry{Name: name, Sequence: sequence}}
+	if previous, ok := s.packets[packetID]; ok {
+		p.obsolete = append(previous.obsolete, previous.Name)
 	}
+	s.packets[packetID] = p
+	// Persist the replacement before removing any older version. Otherwise a
+	// power failure could lose both the new directory entry and its predecessor.
+	if err := s.commitDirectory(); err != nil {
+		return err
+	}
+	// The new file is committed. If cleanup fails, retain the names and retry
+	// before deleting/quarantining this ID, or during restart recovery.
+	_ = s.removeObsolete(p)
 	return nil
 }
 
@@ -109,7 +176,14 @@ func (s *Store) Put(packetID uint16, packetType byte, w io.WriterTo) error {
 func (s *Store) Get(packetID uint16) (io.ReadCloser, error) {
 	s.Lock()
 	defer s.Unlock()
-	f, err := os.OpenFile(s.filePathForId(packetID), os.O_RDONLY, 0)
+	if s.failure != nil {
+		return nil, s.failure
+	}
+	p, ok := s.packets[packetID]
+	if !ok {
+		return nil, fmt.Errorf("packet %d: %w", packetID, os.ErrNotExist)
+	}
+	f, err := os.Open(filepath.Join(s.path, p.Name))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open packet file: %w", err)
 	}
@@ -124,36 +198,34 @@ func (s *Store) Delete(id uint16) error {
 }
 
 // Quarantine is called if a corrupt packet is detected.
-// There is little we can do other than deleting the packet.
 func (s *Store) Quarantine(id uint16) error {
 	s.Lock()
 	defer s.Unlock()
-	f, err := os.CreateTemp(s.path, s.fileNamePrefix(id)+"-*"+s.extension+corruptExtension)
-	if err != nil {
-		s.delete(id) // delete the file (otherwise it may be sent on every reconnection)
-		return fmt.Errorf("failed to create quarantine file: %w", err)
+	if s.failure != nil {
+		return s.failure
 	}
-	tmpFn := f.Name()
-	if err := f.Close(); err != nil {
-		s.delete(id) // delete the file (otherwise it may be sent on every reconnection)
-		return fmt.Errorf("failed to close newly created quarantine file: %w", err)
+	p, ok := s.packets[id]
+	if !ok {
+		return fmt.Errorf("packet %d: %w", id, os.ErrNotExist)
 	}
-	if err := os.Rename(s.filePathForId(id), tmpFn); err != nil {
-		s.delete(id) // delete the file (otherwise it may be sent on every reconnection)
-		return fmt.Errorf("failed to move packet into quarantine: %w", err)
+	if err := s.removeObsolete(p); err != nil {
+		return err
 	}
-	return nil
-}
-
-type idAndModTime struct {
-	id      uint16
-	modTime time.Time
+	name := filepath.Join(s.path, p.Name)
+	if err := os.Rename(name, name+corruptExtension); err != nil {
+		return errors.Join(fmt.Errorf("failed to move packet into quarantine: %w", err), s.delete(id))
+	}
+	delete(s.packets, id)
+	return s.commitDirectory()
 }
 
 // List returns packet IDs in the order they were Put
 func (s *Store) List() ([]uint16, error) {
 	s.Lock()
 	defer s.Unlock()
+	if s.failure != nil {
+		return nil, s.failure
+	}
 
 	return s.list()
 }
@@ -162,6 +234,9 @@ func (s *Store) List() ([]uint16, error) {
 func (s *Store) Reset() error {
 	s.Lock()
 	defer s.Unlock()
+	if s.failure != nil {
+		return s.failure
+	}
 	ids, err := s.list()
 	if err != nil {
 		return err
@@ -182,58 +257,54 @@ func (s *Store) String() string {
 // list returns packet IDs in the order they were Put
 // caller must lock mutex
 func (s *Store) list() ([]uint16, error) {
-	entries, err := os.ReadDir(s.path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read dir: %w", err)
+	ids := make([]uint16, 0, len(s.packets))
+	for id := range s.packets {
+		ids = append(ids, id)
 	}
-
-	ids := make([]idAndModTime, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		fn := entry.Name()
-		if match, err := filepath.Match(s.prefix+"*"+s.extension, fn); err != nil {
-			return nil, fmt.Errorf("failed to read match %s: %w", fn, err)
-		} else if !match {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil, fmt.Errorf("failed to retrieve file info for %s: %w", fn, err)
-		}
-		idStr := fn[len(s.prefix) : len(fn)-len(s.extension)]
-		id, err := strconv.ParseInt(idStr, 10, 0)
-		if err != nil { // Could ignore, but raising an error seems safer
-			return nil, fmt.Errorf("invalid id in filename %s", fn)
-		}
-		ids = append(ids, idAndModTime{uint16(id), info.ModTime()}) // Possible this will truncate id
-	}
-	sort.Slice(ids, func(i, j int) bool {
-		return ids[i].modTime.Before(ids[j].modTime)
+	slices.SortFunc(ids, func(a, b uint16) int {
+		return compareEntries(&s.packets[a].diskEntry, &s.packets[b].diskEntry)
 	})
-	ret := make([]uint16, len(ids))
-	for i := range ids {
-		ret[i] = ids[i].id
-	}
-	return ret, nil
+	return ids, nil
 }
 
 // delete removes the message with the specified store ID
 // caller must gain any required locks
 func (s *Store) delete(id uint16) error {
-	if err := os.Remove(s.filePathForId(id)); err != nil {
+	if s.failure != nil {
+		return s.failure
+	}
+	p, ok := s.packets[id]
+	if !ok {
+		return fmt.Errorf("packet %d: %w", id, os.ErrNotExist)
+	}
+	// Never remove the newest version while an older one could be recovered.
+	if err := s.removeObsolete(p); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(s.path, p.Name)); err != nil {
 		return fmt.Errorf("failed to remove packet file: %w", err)
 	}
+	delete(s.packets, id)
+	return s.commitDirectory()
+}
+
+func (s *Store) removeObsolete(p *storedPacket) error {
+	if len(p.obsolete) == 0 {
+		return nil
+	}
+	for _, name := range p.obsolete {
+		if err := os.Remove(filepath.Join(s.path, name)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove replaced packet: %w", err)
+		}
+	}
+	if s.durable {
+		// Retain the names until the removals are durable, even if the files are
+		// already absent. Delete/Quarantine must retry this barrier before removing
+		// the newest packet, or an old PUBLISH could reappear after a PUBREL.
+		if err := syncDirectory(s.path, s.syncFile); err != nil {
+			return fmt.Errorf("failed to sync replaced packet cleanup: %w", err)
+		}
+	}
+	p.obsolete = nil
 	return nil
-}
-
-// filePathForId returns the full path of the file used to store info for the passed in packet id
-func (s *Store) filePathForId(packetID uint16) string {
-	return filepath.Join(s.path, s.fileNamePrefix(packetID)+s.extension)
-}
-
-// fileNamePrefix returns the beginning of the filename for the specified packet ID
-func (s *Store) fileNamePrefix(packetID uint16) string {
-	return s.prefix + strconv.FormatInt(int64(packetID), 10)
 }

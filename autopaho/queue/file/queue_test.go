@@ -64,7 +64,6 @@ func TestFileQueue(t *testing.T) {
 		if err := q.Enqueue(bytes.NewReader([]byte(fmt.Sprintf(entryFormat, i)))); err != nil {
 			t.Fatalf("error adding entry %d: %s", i, err)
 		}
-		time.Sleep(time.Nanosecond) // Short delay due to file system time resolution
 	}
 	// Remove the initial "This is a test" entry
 	if entry, err := q.Peek(); err != nil {

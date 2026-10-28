@@ -10,7 +10,10 @@
  *  and the Eclipse Distribution License is available at
  *    http://www.eclipse.org/org/documents/edl-v10.php.
  *
- *  SPDX-License-Identifier: EPL-2.0 OR BSD-3-Clause
+ * AI Disclosure: The durable state acknowledgement handling was generated with OpenAI GPT-6 via Codex.
+ * AI-generated portions are made available under CC0-1.0.
+ * SPDX-License-Identifier: (EPL-2.0 OR BSD-3-Clause) AND CC0-1.0
+ * Assisted-by: OpenAI GPT-6
  */
 
 package state
@@ -20,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"time"
 
@@ -83,6 +87,8 @@ type (
 		// We also guarantee to always send to the channel (assuming there is a clean shutdown) so that the end user knows
 		// the status of the request.
 		responseChan chan packets.ControlPacket
+		// A final acknowledgement retained until the persisted packet is deleted or the store is reset.
+		pendingResponse *packets.ControlPacket
 	}
 )
 
@@ -107,6 +113,7 @@ type State struct {
 	serverPackets           map[uint16]byte // The last packet received from the server with this ID (cleared when the transaction is complete)
 	serverStore             storer          // Used to store session state that survives connection loss
 	serverStoreResetPending bool            // A failed reset must complete before stored packets can be reused
+	serverStoreNeedsReload  bool            // A failed mutation may leave the cached packet IDs out of sync with the store
 
 	// The number of messages in flight needs to be limited, as per receive maximum received from the server.
 	inflight *sendQuota
@@ -219,7 +226,9 @@ func (s *State) conAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 		s.clientPackets = make(map[uint16]clientGenerated) // This will be populated whilst packets are resent
 	}
 
-	if s.serverPackets == nil {
+	if s.serverPackets == nil || s.serverStoreNeedsReload {
+		// A storage error may have changed persistent state or made the store unusable.
+		// Recover its inventory before accepting a connection that could deliver messages.
 		if err := s.loadServerSession(ca); err != nil {
 			return removed, fmt.Errorf("failed to load server session: %w", err)
 		}
@@ -238,13 +247,28 @@ func (s *State) conAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 	if err != nil {
 		return removed, fmt.Errorf("failed to load stored message ids: %w", err)
 	}
+	// A final acknowledgement ends the exchange even if deleting its stored packet failed.
+	// Retry cleanup before replaying anything; acknowledged packets must not be retransmitted
+	// (including negative PUBACK/PUBREC responses, as required by MQTT-4.4.0-2).
+	for packetID, transaction := range s.clientPackets {
+		if transaction.pendingResponse == nil {
+			continue
+		}
+		if i := slices.Index(toResend, packetID); i >= 0 {
+			if err := s.clientStore.Delete(packetID); err != nil {
+				return removed, fmt.Errorf("failed to remove acknowledged message %d from store: %w", packetID, err)
+			}
+			toResend = slices.Delete(toResend, i, i+1)
+		}
+		complete(transaction, *transaction.pendingResponse)
+		delete(s.clientPackets, packetID)
+	}
 	s.debug.Printf("retransmitting %d messages", len(toResend))
 	for _, id := range toResend {
 		s.debug.Printf("resending message ID %d", id)
 		r, err := s.clientStore.Get(id)
 		if err != nil {
-			s.errors.Printf("failed to load packet %d from client store: %s", id, err)
-			continue
+			return removed, fmt.Errorf("failed to load packet %d from client store: %w", id, err)
 		}
 
 		// DUP needs to be set when resending PUBLISH
@@ -255,7 +279,7 @@ func (s *State) conAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 		}
 		if err != nil { // If the packet cannot be read, we quarantine it; otherwise we may retry infinitely.
 			if err := s.clientStore.Quarantine(id); err != nil {
-				s.errors.Printf("failed to quarantine packet %d from client store: %s", id, err)
+				return removed, fmt.Errorf("failed to quarantine packet %d from client store: %w", id, err)
 			}
 			s.errors.Printf("failed to retrieve/parse packet %d from client store: %s", id, err)
 			continue
@@ -268,7 +292,7 @@ func (s *State) conAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 		case packets.PUBREL:
 		default:
 			if err := s.clientStore.Quarantine(id); err != nil {
-				s.errors.Printf("failed to quarantine packet %d from client store: %s", id, err)
+				return removed, fmt.Errorf("failed to quarantine packet %d from client store: %w", id, err)
 			}
 			s.errors.Printf("unexpected packet type %d (for packet identifier %d) in client store", p.Type, id)
 			continue
@@ -296,8 +320,8 @@ func (s *State) conAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 	return removed, nil
 }
 
-// loadServerSession should be called once, when the first connection is established.
-// It loads the server session state from the store.
+// loadServerSession loads the server session state when first connecting or
+// reconnecting after an inbound storage mutation failed.
 // The caller must hold a lock on s.mu
 func (s *State) loadServerSession(ca *packets.Connack) error {
 	serverPackets := make(map[uint16]byte)
@@ -308,8 +332,7 @@ func (s *State) loadServerSession(ca *packets.Connack) error {
 	for _, id := range ids {
 		r, err := s.serverStore.Get(id)
 		if err != nil {
-			s.errors.Printf("failed to load packet %d from server store: %s", id, err)
-			continue
+			return fmt.Errorf("failed to load packet %d from server store: %w", id, err)
 		}
 		// We only need to know the packet type, so there is no need to process the entire packet
 		byte1 := make([]byte, 1)
@@ -317,7 +340,7 @@ func (s *State) loadServerSession(ca *packets.Connack) error {
 		_ = r.Close()
 		if err != nil {
 			if err := s.serverStore.Quarantine(id); err != nil {
-				s.errors.Printf("failed to quarantine packet %d from server store (failed to read): %s", id, err)
+				return fmt.Errorf("failed to quarantine packet %d from server store (failed to read): %w", id, err)
 			}
 			s.errors.Printf("packet %d from server store could not be read: %s", id, err)
 			continue // don't want to fail, so quarantine and continue is the best we can do
@@ -330,13 +353,14 @@ func (s *State) loadServerSession(ca *packets.Connack) error {
 			serverPackets[id] = packets.PUBREC
 		default:
 			if err := s.serverStore.Quarantine(id); err != nil {
-				s.errors.Printf("failed to quarantine packet %d from server store: %s", id, err)
+				return fmt.Errorf("failed to quarantine packet %d from server store: %w", id, err)
 			}
 			s.errors.Printf("packet %d from server store had unexpected type %d", id, packetType)
 			continue // don't want to fail, so quarantine and continue is the best we can do
 		}
 	}
 	s.serverPackets = serverPackets
+	s.serverStoreNeedsReload = false
 	return nil
 }
 
@@ -393,8 +417,8 @@ func (s *State) clearConnection() {
 //     acknowledged or the packet is removed from the session (in which case the zero value will be sent), after which
 //     the channel will be closed.
 //
-// If the function returns an error, the response channel will be nil and any actions taken will be rewound prior to
-// return.
+// On error the response channel is nil and runtime allocations are released.
+// Persistent stores can report uncertain writes; follow their recovery requirements before reusing the session.
 func (s *State) AddToSession(ctx context.Context, packet session.Packet) (<-chan packets.ControlPacket, error) {
 	response := make(chan packets.ControlPacket, 1)
 	if err := s.addToSession(ctx, packet, response); err != nil {
@@ -503,23 +527,27 @@ func (s *State) endClientGenerated(packetID uint16, recv *packets.ControlPacket)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if cg, ok := s.clientPackets[packetID]; ok {
-		complete(cg, *recv)
-		delete(s.clientPackets, packetID)
 		// Outgoing publish messages will be in the store (replaced with PUBREL that is sent)
 		if cg.packetType == packets.PUBLISH || cg.packetType == packets.PUBREL {
+			if err := s.clientStore.Delete(packetID); err != nil {
+				// Keep the final response until persistence cleanup succeeds.
+				pendingResponse := *recv
+				cg.pendingResponse = &pendingResponse
+				s.clientPackets[packetID] = cg
+				return fmt.Errorf("failed to remove message %d from store: %w", packetID, err)
+			}
 			if s.inflight != nil {
 				if qErr := s.inflight.Release(); qErr != nil {
 					s.errors.Printf("quota release due to %s: %s", recv.PacketType(), qErr)
 				}
 			}
-			if err := s.clientStore.Delete(packetID); err != nil {
-				s.errors.Printf("failed to remove message %d from store: %s", packetID, err)
-			}
 		}
+		complete(cg, *recv)
+		delete(s.clientPackets, packetID)
 	} else {
 		s.debug.Println("received a response for a message ID we don't know:", recv.PacketID())
 	}
-	return nil // TODO: Should we return errors here (not much that could be done with them)
+	return nil
 }
 
 // Ack is called when the client message handlers have completed (or, if manual acknowledgements are enabled, when
@@ -536,7 +564,7 @@ func (s *State) Ack(pb *packets.Publish) error {
 // `s.mu` must NOT be locked when this is called.
 // Note: Adding properties to the response is not currently supported. If this functionality is added, then it is
 // important to note that QOS2 PUBREC's may be resent if a duplicate `PUBLISH` is received.
-// This function will only return comms related errors (so caller can assume connection has been lost).
+// Storage or communication errors must terminate the connection.
 func (s *State) ack(pb *packets.Publish) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -564,6 +592,18 @@ func (s *State) ack(pb *packets.Publish) error {
 			Properties: &packets.Properties{},
 			PacketID:   pb.PacketID,
 		}
+		// Persist duplicate suppression before acknowledging ownership. Otherwise a restart after PUBREC could deliver
+		// the same QoS 2 message again, contrary to MQTT-4.3.3-10.
+		// A duplicate can reuse a known persisted PUBREC without another write, which could fail even though the
+		// required state already exists. Only trust the cached state if no storage mutation has failed.
+		if !pb.Duplicate || s.serverPackets[pb.PacketID] != packets.PUBREC || s.serverStoreNeedsReload {
+			cp := pr.ToControlPacket()
+			if err := s.serverStore.Put(pb.PacketID, packets.PUBREC, cp); err != nil {
+				s.serverStoreNeedsReload = true
+				return fmt.Errorf("failed to store PUBREC for %d: %w", pb.PacketID, err)
+			}
+			s.serverPackets[pb.PacketID] = cp.Type
+		}
 		if s.conn != nil {
 			s.debug.Printf("sending PUBREC")
 			_, err = pr.WriteTo(s.conn)
@@ -573,12 +613,6 @@ func (s *State) ack(pb *packets.Publish) error {
 		} else {
 			s.debug.Println("PUBREC not send because connection down")
 		}
-
-		// We need to record the fact that a PUBREC has been sent so we can detect receipt of a duplicate `PUBLISH`
-		// (which should not be passed to the client app)
-		cp := pr.ToControlPacket()
-		s.serverStore.Put(pb.PacketID, packets.PUBREC, cp)
-		s.serverPackets[pb.PacketID] = cp.Type
 	default:
 		err = errors.New("ack called but publish not QOS 1 or 2")
 	}
@@ -597,16 +631,13 @@ func (s *State) PacketReceived(recv *packets.ControlPacket, pubChan chan<- *pack
 	//
 	case *packets.Suback: // Not in store, just need to advise client and free Message Identifier
 		s.debug.Println("received SUBACK packet with id ", rp.PacketID)
-		s.endClientGenerated(rp.PacketID, recv)
-		return nil
+		return s.endClientGenerated(rp.PacketID, recv)
 	case *packets.Unsuback: // Not in store, just need to advise client and free Message Identifier
 		s.debug.Println("received UNSUBACK packet with id ", rp.PacketID)
-		s.endClientGenerated(rp.PacketID, recv)
-		return nil
+		return s.endClientGenerated(rp.PacketID, recv)
 	case *packets.Puback: // QOS 1 initial (and final) response
 		s.debug.Println("received PUBACK packet with id ", rp.PacketID)
-		s.endClientGenerated(rp.PacketID, recv)
-		return nil
+		return s.endClientGenerated(rp.PacketID, recv)
 	case *packets.Pubrec: // Initial response to a QOS2 Publish
 		s.debug.Println("received PUBREC packet with id ", rp.PacketID)
 		s.mu.Lock()
@@ -638,7 +669,7 @@ func (s *State) PacketReceived(recv *packets.ControlPacket, pubChan chan<- *pack
 			}
 		} else {
 			if rp.ReasonCode >= 0x80 {
-				s.endClientGenerated(rp.PacketID, recv)
+				return s.endClientGenerated(rp.PacketID, recv)
 			} else {
 				pl := packets.Pubrel{
 					PacketID: rp.PacketID,
@@ -660,8 +691,7 @@ func (s *State) PacketReceived(recv *packets.ControlPacket, pubChan chan<- *pack
 		return nil
 	case *packets.Pubcomp: // QOS 2 final response
 		s.debug.Printf("received PUBCOMP packet with id %d", rp.PacketID)
-		s.endClientGenerated(rp.PacketID, recv)
-		return nil
+		return s.endClientGenerated(rp.PacketID, recv)
 		//
 		// Packets relating to server generated PUBLISH
 		//
@@ -716,16 +746,21 @@ func (s *State) PacketReceived(recv *packets.ControlPacket, pubChan chan<- *pack
 			s.debug.Println("sending PUBCOMP for", pr.PacketID)
 			var err error
 			if s.conn != nil {
+				// Persist completion before PUBCOMP makes this identifier reusable by the sender. An unknown PUBREL
+				// must still receive PUBCOMP (MQTT-4.3.3-11).
+				if _, known := s.serverPackets[pr.PacketID]; known {
+					if err := s.serverStore.Delete(pr.PacketID); err != nil {
+						s.serverStoreNeedsReload = true
+						return fmt.Errorf("failed to remove message %d from server store: %w", pr.PacketID, err)
+					}
+					delete(s.serverPackets, pr.PacketID)
+				}
 				_, err = pc.WriteTo(s.conn)
 				if err != nil {
 					s.errors.Printf("failed to send PUBCOMP for %d: %s", pc.PacketID, err)
 				}
-				// Note: If connection is down we do not clear store (because the server will resend PUBREL upon reconnect)
-				delete(s.serverPackets, pr.PacketID)
-				if sErr := s.serverStore.Delete(pr.PacketID); sErr != nil {
-					s.errors.Printf("failed to remove message %d from server store: %s", pr.PacketID, sErr)
-				}
 			}
+			// If the connection is down, retain state for the PUBREL resent upon reconnect.
 			return err
 		}
 	default:
@@ -789,11 +824,15 @@ func (s *State) allocateNextPacketIdLocked(forPacketType byte, response chan pac
 func (s *State) clean() ([]clientGenerated, error) {
 	s.debug.Println("State.clean() called")
 	removed := make([]clientGenerated, 0, len(s.clientPackets))
-	for _, p := range s.clientPackets {
+	for packetID, p := range s.clientPackets {
+		if p.pendingResponse != nil {
+			// Retain acknowledged transactions until Reset succeeds, including across retries.
+			continue
+		}
 		removed = append(removed, p)
+		delete(s.clientPackets, packetID)
 	}
 	s.serverPackets = make(map[uint16]byte)
-	s.clientPackets = make(map[uint16]clientGenerated)
 
 	// It's important that the stores are reset before another connection is accepted (otherwise we
 	// may transmit data we should not). As such we signal that this is needed and it's done at the
@@ -814,6 +853,7 @@ func (s *State) resetPendingStores() error {
 			serverErr = fmt.Errorf("failed to reset server store: %w", err)
 		} else {
 			s.serverStoreResetPending = false
+			s.serverStoreNeedsReload = false
 		}
 	}
 	if s.clientStoreResetPending {
@@ -821,6 +861,13 @@ func (s *State) resetPendingStores() error {
 			clientErr = fmt.Errorf("failed to reset client store: %w", err)
 		} else {
 			s.clientStoreResetPending = false
+			// There may be transactions that have a pendingResponse due to an earlier failure - clear these
+			for packetID, transaction := range s.clientPackets {
+				if transaction.pendingResponse != nil {
+					complete(transaction, *transaction.pendingResponse)
+					delete(s.clientPackets, packetID)
+				}
+			}
 		}
 	}
 	return errors.Join(serverErr, clientErr)
@@ -848,6 +895,7 @@ func (s *State) tidy() []clientGenerated {
 		default:
 			delete(s.serverPackets, id)
 			if err := s.serverStore.Delete(id); err != nil {
+				s.serverStoreNeedsReload = true
 				s.errors.Printf("failed to remove server packet %d while tidying session: %s", id, err)
 			}
 		}
