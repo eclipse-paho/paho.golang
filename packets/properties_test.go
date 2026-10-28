@@ -165,5 +165,5 @@ func BenchmarkPropertyCreationStruct(b *testing.B) {
 			CorrelationData: []byte("corelid"),
 		}
 	}
-	fmt.Sprintln(p)
+	_ = fmt.Sprintln(p)
 }

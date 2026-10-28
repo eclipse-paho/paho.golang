@@ -79,7 +79,8 @@ func TestDisconnectAfterOutgoingPublish(t *testing.T) {
 		ReconnectBackoff: NewConstantBackoff(time.Millisecond), // Retry connection very quickly!
 		ConnectTimeout:   shortDelay,                           // Connection should come up very quickly
 		AttemptConnection: func(ctx context.Context, _ ClientConfig, _ *url.URL) (net.Conn, error) {
-			ctx, cancel := context.WithCancel(ctx) // Note: go vet warning is invalid
+			ctx, cancel := context.WithCancel(ctx)
+			t.Cleanup(cancel)
 			conn, done, err := ts.Connect(ctx)
 			if err == nil { // The above may fail if attempted too quickly (before disconnect processed)
 				connectCount++
@@ -245,7 +246,8 @@ func TestQueueResume(t *testing.T) {
 		ReconnectBackoff: NewConstantBackoff(time.Millisecond), // Retry connection very quickly!
 		ConnectTimeout:   shortDelay,                           // Connection should come up very quickly
 		AttemptConnection: func(ctx context.Context, _ ClientConfig, _ *url.URL) (net.Conn, error) {
-			ctx, cancel := context.WithCancel(ctx) // Note: go vet warning is invalid
+			ctx, cancel := context.WithCancel(ctx)
+			t.Cleanup(cancel)
 			conn, done, err := ts.Connect(ctx)
 			if err == nil { // The above may fail if attempted too quickly (before disconnect processed)
 				connectCount++

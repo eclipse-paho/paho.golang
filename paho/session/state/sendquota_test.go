@@ -212,15 +212,12 @@ func TestQuotaLoad(t *testing.T) {
 		close(done)
 	}()
 
-	for {
-		select {
-		case cnt := <-countErr:
-			t.Fatalf("messages in flight exceeded receive max: %d", cnt)
-		case err := <-awaitErr:
-			t.Fatalf("error awaiting: %v", err)
-		case <-done:
-			return // all good
-		}
+	select {
+	case cnt := <-countErr:
+		t.Fatalf("messages in flight exceeded receive max: %d", cnt)
+	case err := <-awaitErr:
+		t.Fatalf("error awaiting: %v", err)
+	case <-done:
 	}
 
 	// Check internal state
