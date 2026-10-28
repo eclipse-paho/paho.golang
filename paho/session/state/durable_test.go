@@ -30,9 +30,11 @@ type persistenceErrorStore struct {
 	*memory.Store
 	putErr, deleteErr, getErr, quarantineErr error
 	applyMutationOnError                     bool
+	putCalls                                 int
 }
 
 func (s *persistenceErrorStore) Put(id uint16, kind byte, w io.WriterTo) error {
+	s.putCalls++
 	if s.putErr != nil && !s.applyMutationOnError {
 		return s.putErr
 	}
@@ -129,6 +131,85 @@ func TestInboundQoS2PersistsBeforeAcknowledging(t *testing.T) {
 	}
 	if cp, err := packets.ReadPacket(&wire); err != nil || cp.Type != packets.PUBCOMP {
 		t.Fatalf("unknown PUBREL was not acknowledged: %v, %v", cp, err)
+	}
+}
+
+// TestInboundQoS2DuplicateDoesNotRewriteState checks that a persisted PUBREC can
+// still be resent after reconnect or recovery when the store cannot accept new
+// writes. The duplicate must not be delivered again, and PUBREL must be able to
+// complete the exchange and release the stored state.
+func TestInboundQoS2DuplicateDoesNotRewriteState(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restart=%t", restart), func(t *testing.T) {
+			store := &persistenceErrorStore{Store: memory.New()}
+			s := New(memory.New(), store)
+			t.Cleanup(func() { _ = s.Close() })
+			expiry := uint32(600)
+			connect := &packets.Connect{Properties: &packets.Properties{SessionExpiryInterval: &expiry}}
+			connack := &packets.Connack{SessionPresent: true}
+			if err := s.ConAckReceived(io.Discard, connect, connack); err != nil {
+				t.Fatal(err)
+			}
+			pub := &packets.Publish{PacketID: 7, QoS: 2, Topic: "durable/inbound"}
+			if err := s.Ack(pub); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.ConnectionLost(nil); err != nil {
+				t.Fatal(err)
+			}
+			if restart {
+				if err := s.Close(); err != nil {
+					t.Fatal(err)
+				}
+				s = New(memory.New(), store)
+			}
+			failure := errors.New("no space for new writes")
+			store.putErr = failure
+			var wire bytes.Buffer
+			if err := s.ConAckReceived(&wire, connect, connack); err != nil {
+				t.Fatal(err)
+			}
+			pub.Duplicate = true
+			delivered := make(chan *packets.Publish, 1)
+			if err := s.PacketReceived(pub.ToControlPacket(), delivered); err != nil {
+				t.Fatalf("persisted PUBREC could not be resent: %v", err)
+			}
+			if len(delivered) != 0 {
+				t.Fatal("redelivered an acknowledged QoS 2 message")
+			}
+			if store.putCalls != 1 {
+				t.Fatalf("rewrote persisted PUBREC: Put called %d times", store.putCalls)
+			}
+			if cp, err := packets.ReadPacket(&wire); err != nil || cp.Type != packets.PUBREC || cp.PacketID() != pub.PacketID {
+				t.Fatalf("expected repeated PUBREC: %v, %v", cp, err)
+			}
+			pubrel := packets.NewControlPacket(packets.PUBREL)
+			pubrel.Content.(*packets.Pubrel).PacketID = pub.PacketID
+			if err := s.PacketReceived(pubrel, nil); err != nil {
+				t.Fatal(err)
+			}
+			if cp, err := packets.ReadPacket(&wire); err != nil || cp.Type != packets.PUBCOMP || cp.PacketID() != pub.PacketID {
+				t.Fatalf("expected PUBCOMP: %v, %v", cp, err)
+			}
+			if ids, err := store.List(); err != nil || len(ids) != 0 {
+				t.Fatalf("completed transaction retained stored state: %v, %v", ids, err)
+			}
+
+			// Once the exchange completes, even a PUBLISH with DUP set must be
+			// treated as new and persisted before it can be acknowledged.
+			if err := s.PacketReceived(pub.ToControlPacket(), delivered); err != nil {
+				t.Fatal(err)
+			}
+			if len(delivered) != 1 {
+				t.Fatal("suppressed a new message that reused a completed packet ID")
+			}
+			if err := s.Ack(<-delivered); !errors.Is(err, failure) {
+				t.Fatalf("new transaction bypassed persistence: %v", err)
+			}
+			if wire.Len() != 0 {
+				t.Fatal("acknowledged a new transaction before persisting its PUBREC")
+			}
+		})
 	}
 }
 

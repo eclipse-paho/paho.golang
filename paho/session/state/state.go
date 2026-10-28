@@ -571,12 +571,16 @@ func (s *State) ack(pb *packets.Publish) error {
 		}
 		// Persist duplicate suppression before acknowledging ownership. Otherwise a restart after PUBREC could deliver
 		// the same QoS 2 message again, contrary to MQTT-4.3.3-10.
-		cp := pr.ToControlPacket()
-		if err := s.serverStore.Put(pb.PacketID, packets.PUBREC, cp); err != nil {
-			s.serverStoreNeedsReload = true
-			return fmt.Errorf("failed to store PUBREC for %d: %w", pb.PacketID, err)
+		// A duplicate can reuse a known persisted PUBREC without another write, which could fail even though the
+		// required state already exists. Only trust the cached state if no storage mutation has failed.
+		if !pb.Duplicate || s.serverPackets[pb.PacketID] != packets.PUBREC || s.serverStoreNeedsReload {
+			cp := pr.ToControlPacket()
+			if err := s.serverStore.Put(pb.PacketID, packets.PUBREC, cp); err != nil {
+				s.serverStoreNeedsReload = true
+				return fmt.Errorf("failed to store PUBREC for %d: %w", pb.PacketID, err)
+			}
+			s.serverPackets[pb.PacketID] = cp.Type
 		}
-		s.serverPackets[pb.PacketID] = cp.Type
 		if s.conn != nil {
 			s.debug.Printf("sending PUBREC")
 			_, err = pr.WriteTo(s.conn)
