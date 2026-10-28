@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -28,9 +29,9 @@ import (
 
 type persistenceErrorStore struct {
 	*memory.Store
-	putErr, deleteErr, getErr, quarantineErr error
-	applyMutationOnError                     bool
-	putCalls                                 int
+	putErr, deleteErr, getErr, quarantineErr, listErr error
+	applyMutationOnError                              bool
+	putCalls                                          int
 }
 
 func (s *persistenceErrorStore) Put(id uint16, kind byte, w io.WriterTo) error {
@@ -66,6 +67,13 @@ func (s *persistenceErrorStore) Quarantine(id uint16) error {
 		return s.quarantineErr
 	}
 	return s.Store.Quarantine(id)
+}
+
+func (s *persistenceErrorStore) List() ([]uint16, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	return s.Store.List()
 }
 
 type persistenceCheckingWriter func([]byte) (int, error)
@@ -282,7 +290,10 @@ func TestFinalAcknowledgementWaitsForStoreDeletion(t *testing.T) {
 			store := &persistenceErrorStore{Store: memory.New()}
 			s := New(store, memory.New())
 			t.Cleanup(func() { _ = s.Close() })
-			if err := s.ConAckReceived(io.Discard, &packets.Connect{}, &packets.Connack{}); err != nil {
+			expiry := uint32(600)
+			connect := &packets.Connect{Properties: &packets.Properties{SessionExpiryInterval: &expiry}}
+			connack := &packets.Connack{SessionPresent: true}
+			if err := s.ConAckReceived(io.Discard, connect, connack); err != nil {
 				t.Fatal(err)
 			}
 			qos := byte(2)
@@ -321,6 +332,24 @@ func TestFinalAcknowledgementWaitsForStoreDeletion(t *testing.T) {
 			if _, ok := s.clientPackets[pb.PacketID]; !ok {
 				t.Fatal("released packet identifier after deletion failure")
 			}
+			if err := s.ConnectionLost(nil); err != nil {
+				t.Fatal(err)
+			}
+			var replay bytes.Buffer
+			if err := s.ConAckReceived(&replay, connect, connack); err != nil {
+				t.Fatal(err)
+			}
+			if packet, err := packets.ReadPacket(&replay); err != nil || packet.PacketID() != pb.PacketID {
+				t.Fatalf("stored packet was not retransmitted: %v, %v", packet, err)
+			}
+			select {
+			case <-response:
+				t.Fatal("recovery completed a transaction still in the store")
+			default:
+			}
+			if _, ok := s.clientPackets[pb.PacketID]; !ok {
+				t.Fatal("recovery released an identifier still in the store")
+			}
 			store.deleteErr = nil
 			if err := s.PacketReceived(ack, nil); err != nil {
 				t.Fatal(err)
@@ -335,6 +364,110 @@ func TestFinalAcknowledgementWaitsForStoreDeletion(t *testing.T) {
 			}
 			if _, ok := s.clientPackets[pb.PacketID]; ok {
 				t.Fatal("successful deletion retained packet identifier")
+			}
+		})
+	}
+}
+
+func TestFinalAcknowledgementRecoversAfterAppliedDeletionError(t *testing.T) {
+	for _, kind := range []byte{packets.PUBACK, packets.PUBCOMP, packets.PUBREC} {
+		t.Run(packets.NewControlPacket(kind).PacketType(), func(t *testing.T) {
+			store := &persistenceErrorStore{Store: memory.New(), applyMutationOnError: true}
+			sessionState := New(store, memory.New())
+			t.Cleanup(func() { _ = sessionState.Close() })
+			expiry := uint32(600)
+			receiveMaximum := uint16(2)
+			connect := &packets.Connect{Properties: &packets.Properties{SessionExpiryInterval: &expiry}}
+			connack := &packets.Connack{SessionPresent: true, Properties: &packets.Properties{ReceiveMaximum: &receiveMaximum}}
+			if err := sessionState.ConAckReceived(io.Discard, connect, connack); err != nil {
+				t.Fatal(err)
+			}
+			qos := byte(2)
+			if kind == packets.PUBACK {
+				qos = 1
+			}
+			publish := &packets.Publish{QoS: qos, Topic: "recovered/outbound"}
+			response, err := sessionState.AddToSession(t.Context(), publish)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == packets.PUBCOMP {
+				if err := sessionState.PacketReceived((&packets.Pubrec{PacketID: publish.PacketID}).ToControlPacket(), nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pending := &packets.Publish{QoS: 1, Topic: "recovered/pending"}
+			pendingResponse, err := sessionState.AddToSession(t.Context(), pending)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ack := packets.NewControlPacket(kind)
+			switch packet := ack.Content.(type) {
+			case *packets.Puback:
+				packet.PacketID = publish.PacketID
+			case *packets.Pubcomp:
+				packet.PacketID = publish.PacketID
+			case *packets.Pubrec:
+				packet.PacketID, packet.ReasonCode = publish.PacketID, 0x80
+			}
+			failure := errors.New("delete applied before error")
+			store.deleteErr = failure
+			if err := sessionState.PacketReceived(ack, nil); !errors.Is(err, failure) {
+				t.Fatalf("deletion error was lost: %v", err)
+			}
+			if err := sessionState.ConnectionLost(nil); err != nil {
+				t.Fatal(err)
+			}
+			store.deleteErr = nil
+			store.listErr = errors.New("inventory unavailable")
+			if err := sessionState.ConAckReceived(io.Discard, connect, connack); !errors.Is(err, store.listErr) {
+				t.Fatalf("recovery ignored inventory failure: %v", err)
+			}
+			select {
+			case <-response:
+				t.Fatal("reported completion without recovering the inventory")
+			default:
+			}
+			if _, retained := sessionState.clientPackets[publish.PacketID]; !retained {
+				t.Fatal("released packet identifier before recovery")
+			}
+			store.listErr = nil
+			var replay bytes.Buffer
+			if err := sessionState.ConAckReceived(&replay, connect, connack); err != nil {
+				t.Fatal(err)
+			}
+			if packet, err := packets.ReadPacket(&replay); err != nil || packet.PacketID() != pending.PacketID || replay.Len() != 0 {
+				t.Fatalf("expected only the pending publication to be retransmitted: %v, %v", packet, err)
+			}
+			select {
+			case completed, open := <-response:
+				if !open || !reflect.DeepEqual(completed, *ack) {
+					t.Fatalf("final acknowledgement was not preserved: %#v, open=%t", completed, open)
+				}
+			default:
+				t.Fatal("recovery left the completed publication waiting")
+			}
+			if _, open := <-response; open {
+				t.Fatal("completed response channel was not closed")
+			}
+			if _, retained := sessionState.clientPackets[publish.PacketID]; retained {
+				t.Fatal("recovery retained a completed packet identifier")
+			}
+			select {
+			case <-pendingResponse:
+				t.Fatal("recovery completed an unacknowledged publication")
+			default:
+			}
+			if sessionState.inflight.quota != 1 {
+				t.Fatalf("recovered quota=%d, want 1", sessionState.inflight.quota)
+			}
+			sessionState.lastMid = publish.PacketID - 1
+			replacement := &packets.Publish{QoS: 1, Topic: "recovered/reused"}
+			if _, err := sessionState.AddToSession(t.Context(), replacement); err != nil {
+				t.Fatal(err)
+			}
+			if replacement.PacketID != publish.PacketID {
+				t.Fatalf("allocated packet ID %d instead of recovered ID %d", replacement.PacketID, publish.PacketID)
 			}
 		})
 	}

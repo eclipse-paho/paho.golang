@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"time"
 
@@ -85,7 +86,8 @@ type (
 		// channel. One and only one message will be sent (and the channel closed).
 		// We also guarantee to always send to the channel (assuming there is a clean shutdown) so that the end user knows
 		// the status of the request.
-		responseChan chan packets.ControlPacket
+		responseChan    chan packets.ControlPacket
+		pendingResponse *packets.ControlPacket
 	}
 )
 
@@ -243,6 +245,14 @@ func (s *State) conAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 	toResend, err := s.clientStore.List()
 	if err != nil {
 		return removed, fmt.Errorf("failed to load stored message ids: %w", err)
+	}
+	// Possible that deletion from the store failed, in which case we still need to send the packet
+	for packetID, transaction := range s.clientPackets {
+		if transaction.pendingResponse == nil || slices.Contains(toResend, packetID) {
+			continue
+		}
+		complete(transaction, *transaction.pendingResponse)
+		delete(s.clientPackets, packetID)
 	}
 	s.debug.Printf("retransmitting %d messages", len(toResend))
 	for _, id := range toResend {
@@ -511,6 +521,10 @@ func (s *State) endClientGenerated(packetID uint16, recv *packets.ControlPacket)
 		// Outgoing publish messages will be in the store (replaced with PUBREL that is sent)
 		if cg.packetType == packets.PUBLISH || cg.packetType == packets.PUBREL {
 			if err := s.clientStore.Delete(packetID); err != nil {
+				// Uncertain if packet was deleted or now; queue it to be send following reconnection
+				pendingResponse := *recv
+				cg.pendingResponse = &pendingResponse
+				s.clientPackets[packetID] = cg
 				return fmt.Errorf("failed to remove message %d from store: %w", packetID, err)
 			}
 			if s.inflight != nil {
