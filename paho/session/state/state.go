@@ -332,10 +332,10 @@ func (s *State) conAckReceived(conn io.Writer, cp *packets.Connect, ca *packets.
 		// Any failure from this point should result in loss of connection (so fatal)
 		if s.publishEvents.BeforeSend != nil {
 			handler, connCtx := s.publishEvents, s.connCtx
-			s.mu.Unlock() // Holding mu whist running application code is likely to cause issues
+			s.mu.Unlock() // Holding mu while running application code is likely to cause issues
 			p = handler.PrepareSend(p)
 			s.mu.Lock()
-			if s.connCtx != connCtx { // indicates connection loss whist handling callbacks
+			if s.connCtx != connCtx { // indicates connection loss while handling callbacks
 				return removed, session.ErrNoConnection
 			}
 		}
@@ -846,7 +846,7 @@ func (s *State) clean(trigger *packets.ControlPacket) ([]clientGenerated, error)
 	var ids []uint16
 	var listErr error
 	if handler.OnEvent != nil {
-		// The callback needs to be called with the
+		// Collect packet IDs before clearing the transactions so each discarded publication can be reported.
 		ids, listErr = s.sessionLostPacketIDsLocked()
 		s.sessionLossDone = make(chan struct{})
 		defer func() {
@@ -894,7 +894,7 @@ func (s *State) clean(trigger *packets.ControlPacket) ([]clientGenerated, error)
 	// complete cleanup
 	err := s.resetPendingStores()
 	if err != nil && handler.OnEvent != nil {
-		// Earlier events have already been delivered, so report a the reset failure separately instead of retaining
+		// Earlier events have already been delivered, so report the reset failure separately instead of retaining
 		// the source packets.
 		s.notifyPublishEventLocked(handler, session.PublishEvent{
 			Type: session.PublishEventSessionLost, Trigger: trigger, Err: err,

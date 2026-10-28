@@ -7,8 +7,8 @@ Whilst it may seem straightforward to track message delivery, there are several 
 * The "session" may be lost, meaning partially delivered messages will never be completed.
 * autopaho allows messages to be queued which may further delay delivery.
 
-This library supports the use of an MQTT v5 User Property to track message delivery to the broker (the property does no 
-have to be sent over the wire). It is important to note that this does not mean the message has reached a subscriber. 
+This library supports the use of an MQTT v5 User Property to track message delivery to the broker (the property does not
+have to be sent over the wire). It is important to note that this does not mean the message has reached a subscriber.
 
 The [delivery extension](../../../paho/extensions/delivery) uses this base functionality to demonstrate this and provide 
 a usable tracker.
@@ -51,7 +51,7 @@ session loss, or a tracking error ends the run with a nonzero exit status.
 
 The extension also supports QoS 1 (PUBACK) and QoS 0 (each transmission attempt).
 
-This example deliberately uses QoS 2 because tracking these messages is most complex ()
+This example uses QoS 2 to demonstrate tracking.
 
 The example accepts only PUBCOMP with reason code zero; it conservatively reports PUBCOMP `0x92` as unconfirmed delivery, 
 although that response can occur during recovery and does not prove the broker failed to deliver the message.

@@ -160,8 +160,8 @@ See `examples/queue`.
 
 ## Outgoing publish events
 
-`paho.ClientConfig.PublishEvents` provides callbacks that allow you to track (and edit) packets relating to outgoing 
-publications. This was added to provide a way to track message delivery but may be useful 
+`paho.ClientConfig.PublishEvents` provides callbacks to track outgoing publications and modify packets at key stages
+of delivery.
 
 | Callback | Behaviour |
 | --- | --- |
@@ -169,7 +169,7 @@ publications. This was added to provide a way to track message delivery but may 
 | `PreparePubrel` | On the first successful PUBREC, before storing PUBREL. Allows properties to be copied into PUBREL. |
 | `OnEvent` | Reports acknowledgements, session loss, and local rejection of queued publications through the notifications below. |
 
-`ReadStoredPacket` alows the user to select the data needed by `PreparePubrel` and `OnEvent` for stored publications:
+`ReadStoredPacket` allows the user to select the data needed by `PreparePubrel` and `OnEvent` for stored publications:
 
 | Mode | Source data |
 | --- | --- |
