@@ -101,8 +101,9 @@ type (
 		// the message is added to the session state, so modifications are persisted. It is not called when stored
 		// messages are retransmitted after reconnection.
 		PublishHook func(*Publish)
-		// PublishEvents is used to provide functions that will be called at key points during the transmission of
-		// outgoing publications, optionally loading their stored packets, and packet changes.
+		// PublishEvents configures hooks and notifications for outgoing publications.
+		// The client owns the session's publish event handler: NewClient always installs this value on Session,
+		// replacing any existing handler.
 		PublishEvents session.PublishEventHandler
 		// EnableManualAcknowledgment is used to control the acknowledgment of packets manually.
 		// BEWARE that the MQTT specs require clients to send acknowledgments in the order in which the corresponding

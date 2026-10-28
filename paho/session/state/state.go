@@ -146,9 +146,13 @@ func NewInMemory() *State {
 	}
 }
 
-// SetPublishEventHandler configures outgoing publish events. Clients call this before connecting.
-// If using State directly, also apply handler.PrepareSend to the initial PUBLISH, after AddToSession and before
-// writing to the connection.
+// SetPublishEventHandler replaces outgoing publish events. The zero value clears all publish callbacks.
+// When using State directly, call this before connecting and also apply handler.PrepareSend to the initial PUBLISH,
+// after AddToSession and before writing to the connection.
+//
+// When using State with paho.Client (including AutoPaho), configure paho.ClientConfig.PublishEvents instead.
+// paho.NewClient owns this setting and always replaces the handler with that configuration, including clearing a
+// previously registered handler when the configuration is empty.
 func (s *State) SetPublishEventHandler(handler session.PublishEventHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -422,7 +422,6 @@ func TestSubmissionAndUntrackedPackets(t *testing.T) {
 	h.OnEvent(session.PublishEvent{Type: session.PublishEventPubrec, Source: tracked, Trigger: acknowledgement(packets.PUBREC, 1, 0)})
 	assert.Empty(t, results)
 	assert.Empty(t, problems)
-	h.OnEvent(session.PublishEvent{Type: session.PublishEventNotSent, Source: cp, Err: paho.ErrInvalidArguments})
 	h.OnEvent(session.PublishEvent{Type: session.PublishEventQueueDiscarded, Source: cp, Err: paho.ErrInvalidArguments})
 	assert.Empty(t, results, "local rejection of an untracked publication is ignored")
 	assert.Empty(t, problems)

@@ -46,13 +46,10 @@ const (
 	// unknown. Ordinary reconnects and closing a persistent session do not generate this event for publications
 	// retained in the store.
 	PublishEventSessionLost
-	// PublishEventNotSent reports a PUBLISH known not to have been sent to the server or accepted into session state.
-	// Do not use it if an earlier attempt may have transmitted the publication. Source is the PUBLISH, Err is the
-	// failure, PacketID is zero, and Trigger is nil.
-	PublishEventNotSent
 	// PublishEventQueueDiscarded reports a queued PUBLISH removed after local validation rejected its latest attempt.
 	// Delivery is unknown: an earlier attempt, including before an application restart, may have transmitted it.
 	// Source is the decoded queued PUBLISH, Err is the rejection error, PacketID is zero, and Trigger is nil.
+	// Note: Currently only emitted by AutoPaho
 	PublishEventQueueDiscarded
 )
 
@@ -62,17 +59,17 @@ type PublishEvent struct {
 	Type     PublishEventType
 	PacketID uint16
 	// Trigger is the received acknowledgement, CONNACK, or DISCONNECT responsible for the event. It is nil for session
-	// loss without a packet, PublishEventNotSent, and PublishEventQueueDiscarded.
+	// loss without a packet and PublishEventQueueDiscarded.
 	Trigger *packets.ControlPacket
 	// Source provides the stored PUBLISH or PUBREL at the detail selected by ReadStoredPacket. It is nil with
-	// ReadStoredNone or when loading fails. PublishEventNotSent and PublishEventQueueDiscarded always provide the
-	// complete rejected PUBLISH, regardless of ReadStoredPacket. At PUBCOMP it is a PUBREL, so any application metadata
-	// needed must be copied by PreparePubrel.
+	// ReadStoredNone or when loading fails. PublishEventQueueDiscarded always provides the complete rejected PUBLISH,
+	// regardless of ReadStoredPacket. At PUBCOMP it is a PUBREL, so any application metadata needed must be copied by
+	// PreparePubrel.
 	Source *packets.ControlPacket
 	// Err reports a local store read, decode, or cleanup error, not a broker rejection (which is available in Trigger).
 	// A failed read at Pubrec prevents replacement of the stored PUBLISH so application metadata is not lost.
 	// Session-loss enumeration and bulk cleanup failures use a separate event with PacketID zero and no Source.
-	// For PublishEventNotSent and PublishEventQueueDiscarded, Err instead reports the local failure.
+	// For PublishEventQueueDiscarded, Err instead reports the local failure.
 	Err error
 }
 
@@ -130,8 +127,8 @@ type PublishEventHandler struct {
 	// The default is ReadStoredNone. ReadStoredHeader and ReadStoredFull may add session-store reads, for example
 	// loading the linked PUBLISH when PUBREC is received. Select ReadStoredFull if a callback needs the payload.
 	// Reads needed to retransmit stored packets, including PUBREL responses to repeated PUBREC, still occur with
-	// ReadStoredNone; callbacks receive a nil Source in that case. Already-decoded sources for BeforeSend,
-	// PublishEventNotSent, and PublishEventQueueDiscarded are always complete, regardless of this setting.
+	// ReadStoredNone; callbacks receive a nil Source in that case. Already-decoded sources for BeforeSend and
+	// PublishEventQueueDiscarded are always complete, regardless of this setting.
 	ReadStoredPacket StoredPacketReadMode
 }
 

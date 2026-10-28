@@ -200,13 +200,9 @@ func (t *Tracker) preparePubrel(e session.PubrelPreparation) {
 // An event may trigger both callbacks: for example, a successful acknowledgement followed by a store cleanup failure.
 func (t *Tracker) onEvent(e session.PublishEvent) {
 	id, qos := identity(e.Source)
-	if (e.Type == session.PublishEventNotSent || e.Type == session.PublishEventQueueDiscarded) && e.Source != nil {
+	if e.Type == session.PublishEventQueueDiscarded && e.Source != nil {
 		if id != "" {
-			r := Result{ID: id, QoS: qos, Outcome: NotSent, Err: e.Err}
-			if e.Type == session.PublishEventQueueDiscarded {
-				r.Outcome, r.Err = Unknown, errors.Join(ErrUnconfirmed, e.Err)
-			}
-			t.result(r)
+			t.result(Result{ID: id, QoS: qos, Outcome: Unknown, Err: errors.Join(ErrUnconfirmed, e.Err)})
 		}
 		return
 	}

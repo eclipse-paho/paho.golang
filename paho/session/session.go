@@ -42,7 +42,10 @@ type Packet interface {
 
 // SessionManager will manage the mqtt session state; note that the state may outlast a single `Client` instance
 type SessionManager interface {
-	// SetPublishEventHandler configures outgoing publication hooks and notifications. Call before connecting.
+	// SetPublishEventHandler replaces outgoing publication hooks and notifications. The zero value clears them.
+	// Call before connecting. When used with paho.Client, NewClient calls this method with ClientConfig.PublishEvents,
+	// including its zero value. Configure the handler through ClientConfig instead of calling this method directly.
+	//
 	// Implementations must honor the rules set out in the definition of PublishEventHandler. The client applies
 	// PrepareSend to initial PUBLISH writes; the session manager must apply it to retransmissions and outgoing PUBREL
 	// writes.
