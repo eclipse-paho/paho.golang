@@ -1,4 +1,3 @@
-version: "3.8"
 services:
   mosquitto:
     image: eclipse-mosquitto
@@ -15,12 +14,18 @@ services:
         source: ./binds/mosquitto/config
         target: /mosquitto/config
         read_only: true
+        bind:
+          selinux: Z
       - type: bind
         source: ./binds/mosquitto/data
         target: /mosquitto/data
+        bind:
+          selinux: Z
       - type: bind
         source: ./binds/mosquitto/log
         target: /mosquitto/log
+        bind:
+          selinux: Z
   pub:
     # We include the whole paho module in the context because otherwise a separate module would be needed (and this would
     # pull in github.com/eclipse/paho.golang which makes testing difficult.

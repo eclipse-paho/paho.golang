@@ -34,6 +34,8 @@ type prematurePubrecSession struct {
 	reasonCode byte
 }
 
+func (*prematurePubrecSession) SetPublishEventHandler(session.PublishEventHandler) {}
+
 func (s *prematurePubrecSession) AddToSession(_ context.Context, packet session.Packet) (<-chan packets.ControlPacket, error) {
 	packet.SetIdentifier(1)
 	response := packets.NewControlPacket(packets.PUBREC)

@@ -97,12 +97,14 @@ type (
 		// OnClientError is for example called on net.Error. Note that this may be called multiple times and may be
 		// called following a successful `Disconnect`. See autopaho.errorHandler for an example.
 		OnClientError func(error)
-		// PublishHook allows a user provided function to be called before
-		// a Publish packet is sent allowing it to inspect or modify the
-		// Publish, an example of the utility of this is provided in the
-		// Topic Alias Handler extension which will automatically assign
-		// and use topic alias values rather than topic strings.
+		// PublishHook allows inspection or modification of an outgoing Publish. For QoS 1/2 messages, it runs before
+		// the message is added to the session state, so modifications are persisted. It is not called when stored
+		// messages are retransmitted after reconnection.
 		PublishHook func(*Publish)
+		// PublishEvents configures hooks and notifications for outgoing publications.
+		// The client owns the session's publish event handler: NewClient always installs this value on Session,
+		// replacing any existing handler.
+		PublishEvents session.PublishEventHandler
 		// EnableManualAcknowledgment is used to control the acknowledgment of packets manually.
 		// BEWARE that the MQTT specs require clients to send acknowledgments in the order in which the corresponding
 		// PUBLISH packets were received.
@@ -193,6 +195,7 @@ func NewClient(conf ClientConfig) *Client {
 		c.config.Session = state.NewInMemory()
 		c.config.autoCloseSession = true // We created `Session`, so need to close it when done (so handlers all return)
 	}
+	c.config.Session.SetPublishEventHandler(c.config.PublishEvents)
 	if c.config.PacketTimeout == 0 {
 		c.config.PacketTimeout = 10 * time.Second
 	}
@@ -950,7 +953,7 @@ func (c *Client) PublishWithOptions(ctx context.Context, p *Publish, o PublishOp
 	switch p.QoS {
 	case 0:
 		c.debug.Println("sending QoS0 message")
-		if _, err := pb.WriteTo(c.config.Conn); err != nil {
+		if _, err := c.config.PublishEvents.PrepareSend(pb.ToControlPacket()).WriteTo(c.config.Conn); err != nil {
 			c.reportError(err)
 			return nil, err
 		}
@@ -974,8 +977,8 @@ func (c *Client) publishQoS12(ctx context.Context, pb *packets.Publish, o Publis
 	}
 
 	// From this point on the message is in store, and ret will receive something regardless of whether we succeed in
-	// writing the packet to the connection
-	if _, err := pb.WriteTo(c.config.Conn); err != nil {
+	// writing the packet to the connection or not.
+	if _, err := c.config.PublishEvents.PrepareSend(pb.ToControlPacket()).WriteTo(c.config.Conn); err != nil {
 		c.debug.Printf("failed to write packet %d to connection: %s", pb.PacketID, err)
 		if o.Method == PublishMethod_AsyncSend {
 			return nil, ErrNetworkErrorAfterStored // Async send, so we don't wait for the response (may add callbacks in the future to enable user to obtain status)

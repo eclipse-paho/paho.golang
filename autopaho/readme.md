@@ -158,3 +158,32 @@ transmitted when possible. By default, this queue is held in memory but you can 
 
 See `examples/queue`.
 
+## Outgoing publish events
+
+`paho.ClientConfig.PublishEvents` provides callbacks to track outgoing publications and modify packets at key stages
+of delivery.
+
+| Callback | Behaviour |
+| --- | --- |
+| `BeforeSend` | Before each PUBLISH/PUBREL write, including QoS 0 and retransmissions. Allows changes to the packet that is to be transmitted. |
+| `PreparePubrel` | On the first successful PUBREC, before storing PUBREL. Allows properties to be copied into PUBREL. |
+| `OnEvent` | Reports acknowledgements, session loss, and local rejection of queued publications through the notifications below. |
+
+`ReadStoredPacket` allows the user to select the data needed by `PreparePubrel` and `OnEvent` for stored publications:
+
+| Mode | Source data |
+| --- | --- |
+| `session.ReadStoredNone` (0, default) | No stored source; `Source` is nil. |
+| `session.ReadStoredHeader` (1) | Fixed and variable headers, including properties. The payload may also be present, but callbacks must not rely on it. |
+| `session.ReadStoredFull` (2) | Complete packet, including the payload. |
+
+
+| Notification | Trigger | Meaning |
+| --- | --- | --- |
+| `session.PublishEventPubrec` | Successful PUBREC, including repeats | Progress in a QoS 2 exchange. |
+| `session.PublishEventComplete` | PUBACK, rejection PUBREC, or PUBCOMP | The transaction completed; inspect the reason code to determine the outcome. |
+| `session.PublishEventSessionLost` | CONNACK, DISCONNECT, or none | The session was cleared and the publication discarded; delivery is unknown. |
+| `session.PublishEventQueueDiscarded` | None | Local validation rejected the latest attempt and the queue entry was removed. Earlier attempts may have transmitted it, so delivery is unknown. `Source` contains the queued PUBLISH, `Err` contains the rejection error, and `PacketID` is zero. |
+
+See the [delivery extension](../paho/extensions/delivery/readme.md) for examples,
+application-ID tracking, and detailed guidance on outcomes, errors, and persistence.

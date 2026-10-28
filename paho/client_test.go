@@ -1039,6 +1039,8 @@ type connectionLostErrorSession struct {
 	err error
 }
 
+func (*connectionLostErrorSession) SetPublishEventHandler(session.PublishEventHandler) {}
+
 // ConnectionLost return the predefined error
 func (s *connectionLostErrorSession) ConnectionLost(*packets.Disconnect) error {
 	return s.err
